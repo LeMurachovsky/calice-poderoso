@@ -1,5 +1,7 @@
 # Cálice Poderoso v2
 
+business with Leandro Murachovsky
+
 Camada de governança *human-in-the-loop* para decisões de IA. Toda proposta da IA é interceptada, avaliada por regras e só segue com **juízo humano registrado**: operador identificado, justificativa escrita e ciência declarada de cada violação. Cada evento vai para um livro de registros encadeado e assinado (HMAC-SHA256), verificável a qualquer momento.
 
 ## Rodando
