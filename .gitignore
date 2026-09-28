@@ -1,0 +1,16 @@
+# Ambiente Python (cada um cria o seu com pip install -r requirements.txt)
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Bancos de dados locais (dados de cada máquina, não código)
+*.db
+*.db-shm
+*.db-wal
+
+# Chaves e configurações locais
+.env
+
+# macOS
+.DS_Store

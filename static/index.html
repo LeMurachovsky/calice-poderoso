@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cálice Poderoso — Console de governança</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Ccircle cx='24' cy='24' r='21' fill='none' stroke='%235B3FA0' stroke-width='4'/%3E%3Cpath d='M13 12h22c0 10-5 15-11 15s-11-5-11-15zM24 27v7M17 38c2-3 4-4 7-4s5 1 7 4z' fill='%235B3FA0'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&display=swap" rel="stylesheet">
+<script>
+  try { const t = localStorage.getItem("calice.tema"); if (t) document.documentElement.dataset.theme = t; } catch {}
+</script>
+<style>
+  /* Papel de segurança, tinta de cartório e carimbo roxo. */
+  :root {
+    --papel: #E7EAE3;
+    --folha: #F9FAF6;
+    --folha-2: #F0F2EC;
+    --tinta: #1C2530;
+    --grafite: #59636E;
+    --regua: #D6DBD2;
+    --regua-forte: #BFC6BB;
+    --margem: #E1AFAF;
+    --carimbo: #5B3FA0;
+    --carimbo-suave: #ECE7F7;
+    --pausa: #95590B;
+    --pausa-suave: #F6EAD3;
+    --pronto: #2A6A58;
+    --pronto-suave: #DCEDE5;
+    --rejeicao: #A5313A;
+    --rejeicao-suave: #F6E0E1;
+    --sombra: 0 1px 0 rgba(28, 37, 48, .05), 0 12px 32px -18px rgba(28, 37, 48, .35);
+    --serif: "Source Serif 4", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    --sans: "Public Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    --tinta-carimbo: multiply;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --papel: #11161D; --folha: #19202A; --folha-2: #1F2733; --tinta: #E5E8E2; --grafite: #99A2AC;
+      --regua: #2B3441; --regua-forte: #3B4655; --margem: #5B2F37;
+      --carimbo: #AE98F2; --carimbo-suave: #2A2542; --pausa: #E2A74C; --pausa-suave: #33291A;
+      --pronto: #72C4A8; --pronto-suave: #1A2E29; --rejeicao: #F0838A; --rejeicao-suave: #3A1F25;
+      --sombra: 0 1px 0 rgba(0,0,0,.3), 0 16px 36px -20px rgba(0,0,0,.8);
+      --tinta-carimbo: normal; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --papel: #11161D; --folha: #19202A; --folha-2: #1F2733; --tinta: #E5E8E2; --grafite: #99A2AC;
+    --regua: #2B3441; --regua-forte: #3B4655; --margem: #5B2F37;
+    --carimbo: #AE98F2; --carimbo-suave: #2A2542; --pausa: #E2A74C; --pausa-suave: #33291A;
+    --pronto: #72C4A8; --pronto-suave: #1A2E29; --rejeicao: #F0838A; --rejeicao-suave: #3A1F25;
+    --sombra: 0 1px 0 rgba(0,0,0,.3), 0 16px 36px -20px rgba(0,0,0,.8);
+    --tinta-carimbo: normal; color-scheme: dark;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--papel); color: var(--tinta);
+    font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased;
+  }
+  code { font-family: var(--mono); font-size: .9em; }
+  button { font: inherit; color: inherit; }
+  :where(button, input, textarea, summary, a):focus-visible { outline: 2px solid var(--carimbo); outline-offset: 2px; }
+  [hidden] { display: none !important; }
+
+  /* ── Topo ─────────────────────────────────────────── */
+  .topo {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    padding: 16px clamp(16px, 4vw, 40px); background: var(--folha); border-bottom: 1px solid var(--regua);
+  }
+  .marca { display: flex; align-items: center; gap: 12px; }
+  .marca svg { width: 42px; height: 42px; color: var(--carimbo); flex: none; }
+  .marca h1 { margin: 0; font: 600 22px/1.1 var(--serif); letter-spacing: -.01em; }
+  .marca p { margin: 3px 0 0; color: var(--grafite); font-size: 13px; }
+  .topo-acoes { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .chip-chave {
+    padding: 6px 10px; border-radius: 4px; background: var(--pausa-suave); color: var(--pausa);
+    font-size: 12.5px; font-weight: 600; cursor: help;
+  }
+  .integridade {
+    display: inline-flex; align-items: center; gap: 8px; padding: 7px 13px; cursor: pointer;
+    border: 1px solid var(--regua-forte); border-radius: 999px; background: var(--folha); font-size: 13px; font-weight: 600;
+  }
+  .integridade .ponto { width: 8px; height: 8px; border-radius: 50%; background: var(--grafite); }
+  .integridade .int-meta { color: var(--grafite); font-weight: 400; font-variant-numeric: tabular-nums; }
+  .integridade[data-estado="ok"] .ponto { background: var(--pronto); box-shadow: 0 0 0 3px var(--pronto-suave); }
+  .integridade[data-estado="violado"] { border-color: var(--rejeicao); color: var(--rejeicao); }
+  .integridade[data-estado="violado"] .ponto { background: var(--rejeicao); box-shadow: 0 0 0 3px var(--rejeicao-suave); }
+  .icone {
+    display: grid; place-items: center; width: 36px; height: 36px; cursor: pointer;
+    border: 1px solid var(--regua-forte); border-radius: 50%; background: var(--folha);
+  }
+  .icone svg { width: 18px; height: 18px; }
+  .alerta-livro {
+    margin: 0; padding: 12px clamp(16px, 4vw, 40px); background: var(--rejeicao-suave); color: var(--rejeicao);
+    border-bottom: 1px solid var(--rejeicao); font-weight: 500;
+  }
+
+  /* ── Mesa ─────────────────────────────────────────── */
+  .mesa {
+    display: grid; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr); align-items: start;
+    gap: clamp(20px, 3vw, 36px); max-width: 1320px; margin: 0 auto;
+    padding: clamp(16px, 3vw, 32px) clamp(16px, 4vw, 40px) 72px;
+  }
+  .livro { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 14px; max-height: calc(100vh - 32px); }
+
+  /* Simulador: tracejado porque é bancada de teste, não fluxo real */
+  .simulador { border: 1px dashed var(--regua-forte); border-radius: 8px; }
+  .simulador summary {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 11px 14px; cursor: pointer; list-style: none; font-weight: 600;
+  }
+  .simulador summary::-webkit-details-marker { display: none; }
+  .simulador summary small { margin-left: 6px; color: var(--grafite); font-weight: 400; font-size: 12.5px; }
+  .simulador summary svg { width: 14px; height: 14px; transition: transform .15s; }
+  .simulador[open] summary svg { transform: rotate(180deg); }
+  .sim-corpo { display: grid; gap: 12px; padding: 2px 14px 14px; }
+  .presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .preset {
+    display: grid; gap: 1px; padding: 8px 10px; text-align: left; cursor: pointer;
+    border: 1px solid var(--regua); border-radius: 6px; background: var(--folha);
+  }
+  .preset b { font-size: 13px; }
+  .preset span { font-size: 12px; color: var(--grafite); }
+  .preset:hover { border-color: var(--regua-forte); background: var(--folha-2); }
+  .sim-form { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--regua); }
+  .sim-linha { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; }
+  .sim-linha input[type="range"] { width: 100%; accent-color: var(--carimbo); }
+  .sim-linha output { min-width: 36px; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sim-check { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+  .sim-check input { width: 16px; height: 16px; accent-color: var(--carimbo); }
+
+  /* Abas e fila: páginas do livro de registro */
+  .abas { display: flex; gap: 4px; border-bottom: 1px solid var(--regua); }
+  .aba {
+    padding: 8px 10px; margin-bottom: -1px; cursor: pointer; border: 0; background: none;
+    border-bottom: 2px solid transparent; color: var(--grafite); font-weight: 500; font-size: 14px;
+  }
+  .aba .n { margin-left: 5px; font-variant-numeric: tabular-nums; }
+  .aba[aria-selected="true"] { color: var(--tinta); font-weight: 600; border-bottom-color: var(--carimbo); }
+  .fila {
+    list-style: none; margin: 0; padding: 0; min-height: 260px; overflow-y: auto;
+    background: var(--folha) linear-gradient(var(--margem), var(--margem)) no-repeat 62px 0 / 1px 100%;
+    border: 1px solid var(--regua); border-radius: 8px;
+  }
+  .linha {
+    display: grid; grid-template-columns: 62px minmax(0, 1fr); align-items: start; width: 100%;
+    padding: 0; border: 0; border-bottom: 1px solid var(--regua); background: transparent; text-align: left; cursor: pointer;
+  }
+  .linha:hover { background: var(--folha-2); }
+  .linha[aria-current="true"] { background: var(--carimbo-suave); box-shadow: inset 3px 0 0 var(--carimbo); }
+  .linha time { padding: 13px 0 0 14px; color: var(--grafite); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .linha-corpo { min-width: 0; display: grid; gap: 6px; padding: 11px 14px 12px 12px; }
+  .linha-topo { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+  .linha-doc { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .linha-conf { flex: none; font: 600 14px var(--serif); font-variant-numeric: tabular-nums; color: var(--grafite); }
+  .linha-conf--baixa { color: var(--pausa); }
+  .linha-sub { display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--grafite); font-size: 12.5px; white-space: nowrap; }
+  .linha-sub > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+  .fila-vazia { padding: 28px 18px 28px 78px; color: var(--grafite); font-size: 14px; }
+
+  .estado {
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 4px;
+    font-size: 12.5px; font-weight: 600; white-space: nowrap;
+  }
+  .estado::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .estado--pausa { background: var(--pausa-suave); color: var(--pausa); }
+  .estado--pronto { background: var(--pronto-suave); color: var(--pronto); }
+  .estado--chancelado { background: var(--carimbo-suave); color: var(--carimbo); }
+  .estado--rejeitado { background: var(--rejeicao-suave); color: var(--rejeicao); }
+  .estado--grande { padding: 6px 12px; font-size: 13.5px; }
+
+  /* ── Folha em revisão ─────────────────────────────── */
+  .folha { background: var(--folha); border: 1px solid var(--regua); border-radius: 10px; box-shadow: var(--sombra); overflow: hidden; }
+  .folha-faixa { height: 30px; color: var(--carimbo); opacity: .3; border-bottom: 1px solid var(--regua); }
+  .folha-faixa svg { display: block; width: 100%; height: 100%; }
+  .folha-cabeca {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+    padding: 22px clamp(18px, 3vw, 32px) 18px; border-bottom: 1px solid var(--regua);
+  }
+  .folha-doc { margin: 0; font: 600 clamp(23px, 2.6vw, 31px)/1.15 var(--serif); letter-spacing: -.012em; overflow-wrap: anywhere; }
+  .folha-tx { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 6px 0 0; color: var(--grafite); font-size: 13.5px; }
+  .bloco { padding: 22px clamp(18px, 3vw, 32px); border-bottom: 1px solid var(--regua); }
+  .bloco:last-child { border-bottom: 0; }
+  .bloco > h3 { margin: 0 0 12px; font: 600 17px/1.3 var(--serif); }
+  .proposta {
+    max-width: 70ch; margin: 0; padding: 14px 18px; background: var(--folha-2);
+    border-left: 3px solid var(--regua-forte); font: 400 16.5px/1.65 var(--serif); white-space: pre-wrap;
+  }
+  .medidas { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px 28px; margin: 20px 0 0; }
+  .medida dt { margin-bottom: 6px; color: var(--grafite); font-size: 13px; }
+  .medida dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .medida dd.nao { color: var(--rejeicao); }
+  .medida dd.sim { color: var(--pronto); }
+  .medidor { position: relative; height: 8px; margin: 4px 0 7px; border-radius: 4px; background: var(--folha-2); border: 1px solid var(--regua); }
+  .medidor-barra { position: absolute; inset: -1px auto -1px -1px; width: calc(var(--v) * 100%); border-radius: 4px; background: var(--pronto); }
+  .medidor.abaixo .medidor-barra { background: var(--pausa); }
+  .medidor-limiar { position: absolute; top: -5px; bottom: -5px; left: calc(var(--l) * 100%); width: 2px; background: var(--tinta); }
+  .medida small { margin-left: 6px; color: var(--grafite); font-weight: 400; }
+
+  .instrucao, .limpo, .nota { margin: 0 0 12px; color: var(--grafite); font-size: 14px; max-width: 70ch; }
+  .limpo { margin: 0; color: var(--pronto); font-weight: 500; }
+  .nota { margin: 12px 0 0; font-size: 13px; }
+  .violacoes { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+  .violacao label, .violacao .v-caixa {
+    display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: start; padding: 12px 14px;
+    border: 1px solid var(--regua); border-left: 3px solid var(--pausa); border-radius: 6px; background: var(--folha);
+  }
+  .violacao .v-caixa { grid-template-columns: 1fr; }
+  .violacao label { cursor: pointer; }
+  .violacao label:hover { background: var(--folha-2); }
+  .violacao.sev-critica label, .violacao.sev-critica .v-caixa { border-left-color: var(--rejeicao); }
+  .violacao input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--carimbo); }
+  .violacao label:has(input:checked) { border-color: var(--carimbo); border-left-color: var(--carimbo); background: var(--carimbo-suave); }
+  .v-titulo { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-weight: 600; }
+  .sev { font-size: 12.5px; font-weight: 600; color: var(--pausa); }
+  .sev--critica { color: var(--rejeicao); }
+  .v-msg { display: block; color: var(--grafite); font-size: 14px; }
+  .v-ciencia { display: block; margin-top: 4px; color: var(--carimbo); font-size: 13px; font-weight: 500; }
+
+  /* Formulário de decisão */
+  .decisao { display: grid; gap: 14px; max-width: 660px; }
+  .campo { display: grid; gap: 6px; }
+  .rotulo { color: var(--grafite); font-size: 13px; font-weight: 500; }
+  input[type="text"], textarea {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--regua-forte); border-radius: 6px;
+    background: var(--folha); color: var(--tinta); font: 15px/1.5 var(--sans);
+  }
+  input[type="text"]:focus-visible, textarea:focus-visible { outline-offset: 0; border-color: var(--carimbo); }
+  textarea { min-height: 96px; resize: vertical; }
+  .contador { justify-self: end; color: var(--grafite); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .acoes { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+  .pendencias { flex: 1 1 220px; margin: 0; color: var(--grafite); font-size: 13.5px; }
+  .pendencias.pronto { color: var(--pronto); font-weight: 500; }
+  .botoes { display: flex; flex-wrap: wrap; gap: 8px; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 16px; cursor: pointer;
+    border: 1px solid var(--regua-forte); border-radius: 6px; background: var(--folha); font-weight: 600; font-size: 14px;
+  }
+  .btn:disabled { opacity: .42; cursor: not-allowed; }
+  .btn--primario { background: var(--carimbo); border-color: var(--carimbo); color: var(--folha); }
+  .btn--primario:not(:disabled):hover { filter: brightness(1.08); }
+  .btn--perigo { color: var(--rejeicao); border-color: var(--rejeicao); background: transparent; }
+  .btn--perigo:not(:disabled):hover { background: var(--rejeicao-suave); }
+  .btn--largo { width: 100%; }
+  .copiar {
+    padding: 2px 8px; border: 1px solid var(--regua); border-radius: 4px; background: transparent;
+    color: var(--grafite); font-size: 12px; font-weight: 500; cursor: pointer;
+  }
+  .copiar:hover { color: var(--tinta); border-color: var(--regua-forte); }
+
+  /* Registro da decisão + carimbo */
+  .registro { display: grid; grid-template-columns: minmax(0, 1fr) 210px; gap: 16px 24px; align-items: center; }
+  .registro-dados { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 24px; margin: 0; }
+  .registro-dados .largo { grid-column: 1 / -1; }
+  .registro-dados dt { color: var(--grafite); font-size: 13px; }
+  .registro-dados dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+  .justificativa { font: 400 16px/1.6 var(--serif); }
+  .hash { display: block; margin-bottom: 6px; font-size: 13px; line-height: 1.75; word-spacing: .3em; }
+  .carimbo-area { display: grid; place-items: center; }
+  .carimbo { width: 200px; height: 200px; color: var(--carimbo); opacity: .9; transform: rotate(-9deg); mix-blend-mode: var(--tinta-carimbo); }
+  .carimbo--rejeicao { width: 210px; height: 118px; color: var(--rejeicao); transform: rotate(-6deg); }
+  .carimbo.entrando { animation: carimbar .5s cubic-bezier(.2, .9, .25, 1.15) both; }
+  .carimbo--rejeicao.entrando { animation-name: carimbar-rej; }
+  @keyframes carimbar {
+    0% { opacity: 0; transform: rotate(-16deg) scale(1.45); }
+    55% { opacity: .95; transform: rotate(-9deg) scale(.96); }
+    100% { opacity: .9; transform: rotate(-9deg) scale(1); }
+  }
+  @keyframes carimbar-rej {
+    0% { opacity: 0; transform: rotate(-12deg) scale(1.45); }
+    55% { opacity: .95; transform: rotate(-6deg) scale(.96); }
+    100% { opacity: .9; transform: rotate(-6deg) scale(1); }
+  }
+
+  /* Trilha no livro */
+  .trilha { display: grid; margin: 0; padding: 0; list-style: none; }
+  .trilha li {
+    display: grid; grid-template-columns: 52px minmax(140px, 200px) minmax(0, 1fr); gap: 4px 14px; align-items: baseline;
+    padding: 10px 0; border-bottom: 1px dashed var(--regua);
+  }
+  .trilha li:last-child { border-bottom: 0; }
+  .trilha .seq { font: 600 16px var(--serif); color: var(--carimbo); font-variant-numeric: tabular-nums; }
+  .trilha .ev b { display: block; font-weight: 600; }
+  .trilha .ev time { color: var(--grafite); font-size: 12.5px; }
+  .trilha .elo { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12.5px; color: var(--grafite); }
+  .trilha .elo code { color: var(--tinta); overflow-wrap: anywhere; }
+
+  /* Estado vazio */
+  .vazio {
+    display: grid; justify-items: start; gap: 10px; padding: clamp(28px, 6vw, 64px);
+    background: var(--folha); border: 1px dashed var(--regua-forte); border-radius: 10px;
+  }
+  .vazio svg { width: 54px; height: 54px; color: var(--regua-forte); }
+  .vazio h2 { margin: 0; font: 600 22px/1.2 var(--serif); }
+  .vazio p { margin: 0; max-width: 46ch; color: var(--grafite); }
+
+  /* Avisos */
+  .avisos { position: fixed; right: 20px; bottom: 20px; z-index: 10; display: grid; gap: 8px; max-width: min(400px, calc(100vw - 40px)); }
+  .aviso {
+    padding: 12px 16px; border-radius: 6px; background: var(--tinta); color: var(--folha);
+    box-shadow: var(--sombra); font-size: 14px; animation: surgir .18s ease-out;
+  }
+  .aviso--erro { background: var(--rejeicao); color: #fff; }
+  .aviso--atencao { background: var(--pausa); color: #fff; }
+  .aviso.saindo { opacity: 0; transition: opacity .25s; }
+  @keyframes surgir { from { opacity: 0; transform: translateY(6px); } }
+
+  @media (max-width: 900px) {
+    .mesa { grid-template-columns: 1fr; }
+    .livro { position: static; max-height: none; }
+    .fila { max-height: 360px; }
+  }
+  @media (max-width: 640px) {
+    .folha-cabeca { flex-direction: column; }
+    .registro { grid-template-columns: 1fr; }
+    .registro-dados { grid-template-columns: 1fr; }
+    .carimbo { width: 160px; height: 160px; }
+    .trilha li { grid-template-columns: 44px 1fr; }
+    .trilha .elo { grid-column: 2; }
+    .botoes, .botoes .btn { width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body>
+<header class="topo">
+  <div class="marca">
+    <svg viewBox="0 0 48 48" aria-hidden="true">
+      <circle cx="24" cy="24" r="22" fill="none" stroke="currentColor" stroke-width="2"/>
+      <circle cx="24" cy="24" r="18.5" fill="none" stroke="currentColor" stroke-width=".8"/>
+      <g transform="translate(24 23) scale(.72)" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round">
+        <path d="M-14 -16H14C14 -4 8 3 0 4C-8 3 -14 -4 -14 -16Z"/><path d="M0 4V13"/><path d="M-9 18C-6 14 -3 13 0 13C3 13 6 14 9 18Z"/>
+      </g>
+    </svg>
+    <div>
+      <h1>Cálice Poderoso</h1>
+      <p>Decisões de IA só seguem com juízo humano registrado</p>
+    </div>
+  </div>
+  <div class="topo-acoes">
+    <span id="aviso-chave" class="chip-chave" hidden
+      title="CALICE_SIGNING_KEY não foi definida. Os selos usam uma chave pública de desenvolvimento e não têm valor probatório.">Chave de desenvolvimento</span>
+    <button id="integridade" class="integridade" type="button" data-estado="carregando" title="Verificar o livro agora">
+      <span class="ponto"></span><span class="int-texto">Verificando livro</span><span class="int-meta"></span>
+    </button>
+    <button id="tema" class="icone" type="button" aria-label="Alternar entre tema claro e escuro">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 2.5a7.5 7.5 0 0 1 0 15z" fill="currentColor"/></svg>
+    </button>
+  </div>
+</header>
+<p id="alerta-livro" class="alerta-livro" role="alert" hidden></p>
+
+<main class="mesa">
+  <aside class="livro" aria-label="Fila de propostas">
+    <details class="simulador">
+      <summary>
+        <span>Simular proposta da IA<small>bancada de teste</small></span>
+        <svg viewBox="0 0 14 14" aria-hidden="true"><path d="M3 5l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      </summary>
+      <div class="sim-corpo">
+        <div class="presets">
+          <button type="button" class="preset" data-preset="risco"><b>Com risco</b><span>sem cláusula, 0,40</span></button>
+          <button type="button" class="preset" data-preset="limite"><b>No limite</b><span>com cláusula, 0,84</span></button>
+          <button type="button" class="preset" data-preset="conforme"><b>Conforme</b><span>com cláusula, 0,95</span></button>
+        </div>
+        <form id="form-sim" class="sim-form">
+          <label class="campo"><span class="rotulo">Documento</span><input id="sim-doc" type="text" maxlength="120" required></label>
+          <label class="campo"><span class="rotulo">Conteúdo proposto</span><textarea id="sim-conteudo" rows="3" maxlength="20000" required></textarea></label>
+          <label class="campo"><span class="rotulo">Confiança do modelo</span>
+            <span class="sim-linha"><input id="sim-conf" type="range" min="0" max="1" step="0.01" value="0.9"><output id="sim-conf-v" for="sim-conf">0,90</output></span>
+          </label>
+          <label class="sim-check"><input id="sim-clausula" type="checkbox" checked> Contém cláusula de responsabilidade</label>
+          <button type="submit" class="btn btn--largo">Enviar para interceptação</button>
+        </form>
+      </div>
+    </details>
+
+    <div class="abas" role="tablist" aria-label="Filtrar propostas">
+      <button type="button" class="aba" role="tab" data-filtro="pendentes" aria-selected="true">Aguardando<span class="n">0</span></button>
+      <button type="button" class="aba" role="tab" data-filtro="concluidas" aria-selected="false">Decididas<span class="n">0</span></button>
+      <button type="button" class="aba" role="tab" data-filtro="todas" aria-selected="false">Todas<span class="n">0</span></button>
+    </div>
+    <ol id="fila" class="fila" aria-label="Propostas"></ol>
+  </aside>
+
+  <section id="detalhe" aria-live="polite"></section>
+</main>
+
+<div id="avisos" class="avisos" aria-live="polite"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = (s, el = document) => el.querySelector(s);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const lerLocal = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+  const gravarLocal = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+  const reduzMovimento = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const ESTADOS = {
+    FATOR_DE_PAUSA_ATIVADO: { curto: "Em pausa", longo: "Fator de pausa ativado", classe: "pausa" },
+    PRONTO_PARA_CHANCELA: { curto: "Pronta", longo: "Pronta para chancela", classe: "pronto" },
+    CHANCELADO_E_CONCLUIDO: { curto: "Chancelada", longo: "Chancelada", classe: "chancelado" },
+    REJEITADO: { curto: "Rejeitada", longo: "Rejeitada", classe: "rejeitado" },
+  };
+  const PENDENTES = new Set(["FATOR_DE_PAUSA_ATIVADO", "PRONTO_PARA_CHANCELA"]);
+  const NOMES = { LACUNA_JURIDICA: "Lacuna jurídica", CONFIANCA_BAIXA: "Confiança insuficiente" };
+  const SEVERIDADE = { CRITICA: "crítica", ALTA: "alta", MEDIA: "média" };
+  const EVENTOS = { INTERCEPTACAO: "Interceptação", CHANCELA: "Chancela", REJEICAO: "Rejeição" };
+  const MIN_OPERADOR = 3, MIN_JUSTIFICATIVA = 15;
+
+  const estado = {
+    itens: [], resumo: {}, filtro: "pendentes", sel: null, det: null,
+    ciencia: new Set(), justificativa: "", operador: lerLocal("calice.operador") || "",
+    recem: null, ocupado: false, padrao: "CUSTODIA_PROBATORIA_CPC",
+  };
+
+  const fmtHora = new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  const fmtData = new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "medium" });
+  const fmtDia = new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+  const num = (v) => Number(v).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const agrupar = (h) => (h || "").match(/.{1,8}/g)?.join(" ") ?? "";
+  const abreviar = (h) => (h ? `${h.slice(0, 10)}…${h.slice(-6)}` : "");
+  const plural = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
+
+  const CALICE = '<path d="M-14 -16H14C14 -4 8 3 0 4C-8 3 -14 -4 -14 -16Z"/><path d="M0 4V13"/><path d="M-9 18C-6 14 -3 13 0 13C3 13 6 14 9 18Z"/>';
+  const FILTRO_TINTA = `<filter id="tinta" x="-10%" y="-10%" width="120%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency="1.1" numOctaves="2" seed="11" result="grao"/>
+      <feColorMatrix in="grao" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  3.2 0 0 0 -0.55" result="mascara"/>
+      <feComposite in="SourceGraphic" in2="mascara" operator="in" result="falhado"/>
+      <feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="1" seed="4" result="onda"/>
+      <feDisplacementMap in="falhado" in2="onda" scale="2.4"/>
+    </filter>`;
+
+  let guillocheCache = "";
+  function guilloche() {
+    if (guillocheCache) return guillocheCache;
+    const w = 900, h = 30, meio = h / 2;
+    let caminhos = "";
+    for (let k = 0; k < 7; k++) {
+      const fase = (k * Math.PI) / 7;
+      let d = `M0 ${meio}`;
+      for (let x = 0; x <= w; x += 3) {
+        const y = meio + (meio - 3) * Math.sin((x / 38) * Math.PI + fase) * Math.cos(x / 170 + fase * 2);
+        d += ` L${x} ${y.toFixed(1)}`;
+      }
+      caminhos += `<path d="${d}"/>`;
+    }
+    guillocheCache = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width=".7">${caminhos}</g></svg>`;
+    return guillocheCache;
+  }
+
+  // ── Comunicação com a API ──────────────────────────
+  async function api(caminho, opcoes = {}) {
+    const resp = await fetch(caminho, { headers: { "Content-Type": "application/json" }, ...opcoes });
+    let corpo = null;
+    try { corpo = await resp.json(); } catch {}
+    if (!resp.ok) throw new Error(mensagemDeErro(corpo, resp.status));
+    return corpo;
+  }
+  function mensagemDeErro(corpo, status) {
+    const d = corpo && corpo.detail;
+    if (!d) return `o servidor respondeu ${status}.`;
+    if (typeof d === "string") return d;
+    if (Array.isArray(d)) return d.map((e) => `${(e.loc || []).slice(1).join(".")}: ${e.msg}`).join("; ");
+    if (d.mensagem) return d.mensagem + (d.violacoes_sem_ciencia ? ` Pendentes: ${d.violacoes_sem_ciencia.join(", ")}.` : "");
+    return JSON.stringify(d);
+  }
+
+  function avisar(msg, tipo = "ok") {
+    const el = document.createElement("div");
+    el.className = `aviso aviso--${tipo}`;
+    el.textContent = msg;
+    $("#avisos").append(el);
+    setTimeout(() => { el.classList.add("saindo"); setTimeout(() => el.remove(), 260); }, 4200);
+  }
+
+  // ── Livro (integridade) ────────────────────────────
+  async function carregarSaude() {
+    try {
+      const h = await api("/api/v1/health");
+      estado.padrao = h.padrao;
+      $("#aviso-chave").hidden = !h.chave_desenvolvimento;
+    } catch {}
+  }
+  async function verificar() {
+    const b = $("#integridade");
+    try {
+      const v = await api("/api/v1/ledger/verify");
+      b.dataset.estado = v.integro ? "ok" : "violado";
+      b.querySelector(".int-texto").textContent = v.integro
+        ? "Livro íntegro"
+        : (v.falha.seq ? `Livro violado no registro #${v.falha.seq}` : "Livro inconsistente");
+      b.querySelector(".int-meta").textContent = plural(v.total_eventos, "registro", "registros");
+      b.title = v.integro
+        ? `Último hash: ${v.head_hash}\nVerificado em ${fmtData.format(new Date(v.verificado_em))}. Clique para verificar de novo.`
+        : v.falha.motivo;
+      const alerta = $("#alerta-livro");
+      alerta.hidden = v.integro;
+      if (!v.integro) {
+        alerta.textContent = `Integridade comprometida${v.falha.seq ? ` no registro #${v.falha.seq}` : ""}: ${v.falha.motivo} Audite o banco antes de emitir novos selos.`;
+      }
+    } catch {
+      b.dataset.estado = "erro";
+      b.querySelector(".int-texto").textContent = "Verificação indisponível";
+      b.querySelector(".int-meta").textContent = "";
+    }
+  }
+
+  // ── Fila ───────────────────────────────────────────
+  async function carregarFila() {
+    const d = await api("/api/v1/transactions?limit=200");
+    estado.itens = d.itens;
+    estado.resumo = d.resumo;
+    renderFila();
+    if (estado.sel && estado.det) {
+      const atual = d.itens.find((i) => i.transaction_id === estado.sel);
+      if (atual && atual.status !== estado.det.status) await abrir(estado.sel);
+    }
+  }
+
+  function renderFila() {
+    const r = estado.resumo;
+    const contagem = {
+      pendentes: (r.FATOR_DE_PAUSA_ATIVADO || 0) + (r.PRONTO_PARA_CHANCELA || 0),
+      concluidas: (r.CHANCELADO_E_CONCLUIDO || 0) + (r.REJEITADO || 0),
+      todas: r.TOTAL || 0,
+    };
+    document.querySelectorAll(".aba").forEach((b) => {
+      b.setAttribute("aria-selected", String(b.dataset.filtro === estado.filtro));
+      b.querySelector(".n").textContent = contagem[b.dataset.filtro];
+    });
+    const itens = estado.itens.filter((i) =>
+      estado.filtro === "todas" || (estado.filtro === "pendentes") === PENDENTES.has(i.status));
+    const fila = $("#fila");
+    if (!itens.length) {
+      fila.innerHTML = `<li class="fila-vazia">${estado.filtro === "pendentes"
+        ? "Nenhuma proposta aguardando decisão. Abra <b>Simular proposta da IA</b> para gerar uma."
+        : "Nenhuma proposta decidida ainda."}</li>`;
+      return;
+    }
+    fila.innerHTML = itens.map((i) => {
+      const e = ESTADOS[i.status];
+      const quando = new Date(i.created_at);
+      const nv = i.violations.length;
+      const baixa = i.violations.some((v) => v.codigo === "CONFIANCA_BAIXA");
+      return `<li><button type="button" class="linha" data-id="${esc(i.transaction_id)}"${i.transaction_id === estado.sel ? ' aria-current="true"' : ""}>
+        <time datetime="${esc(i.created_at)}" title="${esc(fmtData.format(quando))}">${fmtHora.format(quando)}</time>
+        <span class="linha-corpo">
+          <span class="linha-topo">
+            <span class="linha-doc" title="${esc(i.document_id)}">${esc(i.document_id)}</span>
+            <span class="linha-conf${baixa ? " linha-conf--baixa" : ""}" title="Confiança ${num(i.confidence_score)}" aria-label="Confiança ${num(i.confidence_score)}">${num(i.confidence_score)}</span>
+          </span>
+          <span class="linha-sub">
+            <span class="estado estado--${e.classe}">${e.curto}</span>
+            <span>${nv ? plural(nv, "violação", "violações") : "Sem violações"}</span>
+          </span>
+        </span>
+      </button></li>`;
+    }).join("");
+  }
+
+  // ── Detalhe ────────────────────────────────────────
+  async function abrir(id, { rolar = false } = {}) {
+    if (id !== estado.sel) { estado.ciencia = new Set(); estado.justificativa = ""; }
+    estado.sel = id;
+    renderFila();
+    try {
+      estado.det = await api(`/api/v1/transactions/${encodeURIComponent(id)}`);
+      renderDetalhe();
+      if (rolar && matchMedia("(max-width: 900px)").matches) {
+        $("#detalhe").scrollIntoView({ behavior: reduzMovimento ? "auto" : "smooth", block: "start" });
+      }
+    } catch (e) {
+      avisar(`Não foi possível abrir a proposta: ${e.message}`, "erro");
+    }
+  }
+
+  function renderDetalhe() {
+    const t = estado.det;
+    const alvo = $("#detalhe");
+    if (!t) {
+      alvo.innerHTML = `<div class="vazio">
+        <svg viewBox="-24 -24 48 48" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">${CALICE}</g></svg>
+        <h2>Nenhuma proposta em revisão</h2>
+        <p>Escolha uma proposta na fila para ler o diagnóstico e registrar sua decisão.</p>
+      </div>`;
+      return;
+    }
+    const e = ESTADOS[t.status];
+    const pendente = PENDENTES.has(t.status);
+    const abaixo = t.confidence_score < t.limiar_confianca;
+    alvo.innerHTML = `<article class="folha">
+      <div class="folha-faixa">${guilloche()}</div>
+      <header class="folha-cabeca">
+        <div>
+          <h2 class="folha-doc">${esc(t.document_id)}</h2>
+          <p class="folha-tx"><code>${esc(t.transaction_id)}</code><button type="button" class="copiar" data-copiar="${esc(t.transaction_id)}">Copiar</button></p>
+        </div>
+        <span class="estado estado--${e.classe} estado--grande">${e.longo}</span>
+      </header>
+
+      <section class="bloco">
+        <h3>Proposta da IA</h3>
+        <p class="proposta">${esc(t.content)}</p>
+        <dl class="medidas">
+          <div class="medida">
+            <dt>Confiança do modelo</dt>
+            <dd>
+              <div class="medidor${abaixo ? " abaixo" : ""}" style="--v:${t.confidence_score};--l:${t.limiar_confianca}" role="img"
+                aria-label="Confiança ${num(t.confidence_score)}, mínimo exigido ${num(t.limiar_confianca)}">
+                <span class="medidor-barra"></span><span class="medidor-limiar"></span>
+              </div>
+              ${num(t.confidence_score)}<small>mínimo ${num(t.limiar_confianca)}</small>
+            </dd>
+          </div>
+          <div class="medida"><dt>Cláusula de responsabilidade</dt><dd class="${t.liability_clause ? "sim" : "nao"}">${t.liability_clause ? "Presente" : "Ausente"}</dd></div>
+          <div class="medida"><dt>Interceptada em</dt><dd>${fmtData.format(new Date(t.created_at))}</dd></div>
+        </dl>
+      </section>
+
+      <section class="bloco">
+        <h3>Diagnóstico</h3>
+        ${diagnosticoHTML(t, pendente)}
+      </section>
+
+      <section class="bloco">
+        <h3>Juízo humano</h3>
+        ${pendente ? formularioHTML(t) : registroHTML(t)}
+      </section>
+
+      <section class="bloco">
+        <h3>Registros no livro</h3>
+        <ol class="trilha">${t.ledger.map((ev) => `<li>
+          <span class="seq">#${ev.seq}</span>
+          <span class="ev"><b>${EVENTOS[ev.evento] || esc(ev.evento)}</b><time>${fmtData.format(new Date(ev.created_at))}</time></span>
+          <span class="elo" title="Hash: ${esc(ev.hash)}&#10;Anterior: ${esc(ev.prev_hash)}">
+            <span>Hash</span><code>${abreviar(ev.hash)}</code>
+            <span>Anterior</span><code>${abreviar(ev.prev_hash)}</code>
+          </span>
+        </li>`).join("")}</ol>
+        <p class="nota">Cada registro é assinado junto com o hash do anterior. Alterar qualquer um deles invalida a verificação do livro.</p>
+      </section>
+    </article>`;
+    if (pendente) ligarFormulario(t);
+  }
+
+  function diagnosticoHTML(t, pendente) {
+    if (!t.violations.length) {
+      return `<p class="limpo">Nenhuma regra foi violada. A proposta depende apenas da sua decisão.</p>`;
+    }
+    const itens = t.violations.map((v) => {
+      const sev = (v.severidade || "").toLowerCase();
+      const cabeca = `<span class="v-titulo">${esc(NOMES[v.codigo] || v.codigo)}<span class="sev sev--${esc(sev)}">Severidade ${SEVERIDADE[v.severidade] || esc(v.severidade)}</span></span>
+        <span class="v-msg">${esc(v.mensagem)}</span>`;
+      if (pendente) {
+        return `<li class="violacao sev-${esc(sev)}"><label>
+          <input type="checkbox" data-codigo="${esc(v.codigo)}"${estado.ciencia.has(v.codigo) ? " checked" : ""}>
+          <span>${cabeca}</span></label></li>`;
+      }
+      const nota = t.status === "CHANCELADO_E_CONCLUIDO" ? `<span class="v-ciencia">Ciência declarada pelo operador</span>` : "";
+      return `<li class="violacao sev-${esc(sev)}"><div class="v-caixa"><span>${cabeca}${nota}</span></div></li>`;
+    }).join("");
+    const intro = pendente
+      ? `<p class="instrucao">Marque cada violação para declarar ciência. A chancela só é liberada com todas marcadas; a rejeição não exige.</p>`
+      : "";
+    return `${intro}<ul class="violacoes">${itens}</ul>`;
+  }
+
+  function formularioHTML(t) {
+    const dica = t.violations.length
+      ? "Explique por que a proposta pode seguir apesar das violações, ou por que deve ser barrada."
+      : "Registre o que você conferiu antes de decidir.";
+    return `<form id="form-decisao" class="decisao" novalidate>
+      <label class="campo"><span class="rotulo">Operador responsável</span>
+        <input id="operador" type="text" autocomplete="name" maxlength="120" placeholder="Nome completo" value="${esc(estado.operador)}"></label>
+      <label class="campo"><span class="rotulo">Justificativa</span>
+        <textarea id="justificativa" rows="4" maxlength="2000" placeholder="${esc(dica)}">${esc(estado.justificativa)}</textarea>
+        <span class="contador" id="contador"></span></label>
+      <div class="acoes">
+        <p class="pendencias" id="pendencias"></p>
+        <div class="botoes">
+          <button type="button" class="btn btn--perigo" id="btn-rejeitar">Rejeitar proposta</button>
+          <button type="submit" class="btn btn--primario" id="btn-chancelar">Chancelar e emitir selo</button>
+        </div>
+      </div>
+    </form>`;
+  }
+
+  function ligarFormulario(t) {
+    const form = $("#form-decisao");
+    form.addEventListener("input", (ev) => {
+      if (ev.target.id === "operador") { estado.operador = ev.target.value; gravarLocal("calice.operador", ev.target.value.trim()); }
+      if (ev.target.id === "justificativa") estado.justificativa = ev.target.value;
+      atualizarFormulario(t);
+    });
+    document.querySelectorAll(".violacao input[type=checkbox]").forEach((cb) => cb.addEventListener("change", () => {
+      cb.checked ? estado.ciencia.add(cb.dataset.codigo) : estado.ciencia.delete(cb.dataset.codigo);
+      atualizarFormulario(t);
+    }));
+    form.addEventListener("submit", (ev) => { ev.preventDefault(); decidir(t, true); });
+    $("#btn-rejeitar").addEventListener("click", () => decidir(t, false));
+    atualizarFormulario(t);
+  }
+
+  function atualizarFormulario(t) {
+    if (!$("#form-decisao")) return;
+    const op = estado.operador.trim().length;
+    const js = estado.justificativa.trim().length;
+    const semCiencia = t.violations.filter((v) => !estado.ciencia.has(v.codigo)).length;
+    const baseOk = op >= MIN_OPERADOR && js >= MIN_JUSTIFICATIVA;
+
+    const falta = [];
+    if (op < MIN_OPERADOR) falta.push("nome do operador");
+    if (js < MIN_JUSTIFICATIVA) falta.push("justificativa");
+    if (semCiencia) falta.push(`ciência de ${plural(semCiencia, "violação", "violações")}`);
+
+    $("#contador").textContent = js < MIN_JUSTIFICATIVA ? `${js} de ${MIN_JUSTIFICATIVA} caracteres mínimos` : `${js} caracteres`;
+    $("#btn-rejeitar").disabled = estado.ocupado || !baseOk;
+    $("#btn-chancelar").disabled = estado.ocupado || !baseOk || semCiencia > 0;
+    const p = $("#pendencias");
+    p.classList.toggle("pronto", !falta.length);
+    p.textContent = falta.length ? `Para chancelar, falta: ${falta.join(", ")}.` : "Tudo certo para registrar a decisão.";
+  }
+
+  async function decidir(t, aprovar) {
+    if (estado.ocupado) return;
+    estado.ocupado = true;
+    atualizarFormulario(t);
+    const botao = aprovar ? $("#btn-chancelar") : $("#btn-rejeitar");
+    const rotulo = botao.textContent;
+    botao.textContent = aprovar ? "Emitindo selo…" : "Registrando rejeição…";
+    try {
+      await api(aprovar ? "/api/v1/seal" : "/api/v1/reject", {
+        method: "POST",
+        body: JSON.stringify({
+          transaction_id: t.transaction_id,
+          operator_name: estado.operador.trim(),
+          notes: estado.justificativa.trim(),
+          acknowledged_violations: [...estado.ciencia],
+        }),
+      });
+      estado.recem = t.transaction_id;
+      estado.justificativa = "";
+      estado.ciencia = new Set();
+      estado.ocupado = false;
+      avisar(aprovar ? "Selo emitido e registrado no livro." : "Proposta rejeitada e registrada no livro.");
+      await abrir(t.transaction_id);
+      await carregarFila();
+      verificar();
+    } catch (e) {
+      estado.ocupado = false;
+      botao.textContent = rotulo;
+      avisar(`${aprovar ? "Não foi possível emitir o selo" : "Não foi possível rejeitar"}: ${e.message}`, "erro");
+      if (/já foi decidida/.test(e.message)) { await abrir(t.transaction_id); await carregarFila(); }
+      else atualizarFormulario(t);
+    }
+  }
+
+  function registroHTML(t) {
+    const d = t.decisao;
+    const aprovado = t.status === "CHANCELADO_E_CONCLUIDO";
+    const animar = estado.recem === t.transaction_id;
+    estado.recem = null;
+    return `<div class="registro">
+      <dl class="registro-dados">
+        <div><dt>${aprovado ? "Selo" : "Registro de rejeição"}</dt><dd><code>${esc(d.id)}</code></dd></div>
+        <div><dt>Operador</dt><dd>${esc(d.operador)}</dd></div>
+        <div><dt>${aprovado ? "Chancelada em" : "Rejeitada em"}</dt><dd>${fmtData.format(new Date(d.decided_at))}</dd></div>
+        <div><dt>Padrão</dt><dd><code>${esc(estado.padrao)}</code></dd></div>
+        <div class="largo"><dt>Justificativa</dt><dd class="justificativa">${esc(d.justificativa)}</dd></div>
+        <div class="largo"><dt>Prova criptográfica</dt><dd><code class="hash">${agrupar(d.proof_hash)}</code>
+          <button type="button" class="copiar" data-copiar="${esc(d.proof_hash)}">Copiar prova</button></dd></div>
+      </dl>
+      <div class="carimbo-area">${aprovado ? carimboSelo(d, animar) : carimboRejeicao(d, animar)}</div>
+    </div>`;
+  }
+
+  function carimboSelo(d, animar) {
+    const dia = fmtDia.format(new Date(d.decided_at));
+    return `<svg class="carimbo${animar ? " entrando" : ""}" viewBox="0 0 200 200" role="img" aria-label="Selo Cálice aposto em ${dia}">
+      <defs>${FILTRO_TINTA}<path id="arco-selo" d="M100,100 m-73,0 a73,73 0 1,1 146,0 a73,73 0 1,1 -146,0"/></defs>
+      <g filter="url(#tinta)">
+        <circle cx="100" cy="100" r="94" fill="none" stroke="currentColor" stroke-width="4.5"/>
+        <circle cx="100" cy="100" r="86.5" fill="none" stroke="currentColor" stroke-width="1.3"/>
+        <circle cx="100" cy="100" r="59" fill="none" stroke="currentColor" stroke-width="1.3"/>
+        <text fill="currentColor" font-family="Source Serif 4, Georgia, serif" font-size="14" font-weight="700" letter-spacing="1.5">
+          <textPath href="#arco-selo" textLength="450" lengthAdjust="spacing">CÁLICE PODEROSO ★ CHANCELA HUMANA ★</textPath>
+        </text>
+        <g transform="translate(100 86) scale(1.2)" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round">${CALICE}</g>
+        <text x="100" y="130" text-anchor="middle" fill="currentColor" font-family="Source Serif 4, Georgia, serif" font-size="14" font-weight="700">${dia}</text>
+        <text x="100" y="145" text-anchor="middle" fill="currentColor" font-family="ui-monospace, Menlo, monospace" font-size="9" letter-spacing="1">${esc(d.id.slice(-8))}</text>
+      </g>
+    </svg>`;
+  }
+
+  function carimboRejeicao(d, animar) {
+    const dia = fmtDia.format(new Date(d.decided_at));
+    return `<svg class="carimbo carimbo--rejeicao${animar ? " entrando" : ""}" viewBox="0 0 220 118" role="img" aria-label="Proposta rejeitada em ${dia}">
+      <defs>${FILTRO_TINTA}</defs>
+      <g filter="url(#tinta)">
+        <rect x="5" y="8" width="210" height="102" rx="7" fill="none" stroke="currentColor" stroke-width="4.5"/>
+        <rect x="13" y="16" width="194" height="86" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"/>
+        <text x="110" y="66" text-anchor="middle" fill="currentColor" font-family="Source Serif 4, Georgia, serif" font-size="31" font-weight="700" letter-spacing="3">REJEITADA</text>
+        <text x="110" y="89" text-anchor="middle" fill="currentColor" font-family="Source Serif 4, Georgia, serif" font-size="13" font-weight="600">${dia}</text>
+      </g>
+    </svg>`;
+  }
+
+  // ── Simulador ──────────────────────────────────────
+  const AMOSTRAS = [
+    "Liberação de pagamento de R$ 184.500,00 ao fornecedor Agro Sul Ltda., referente ao contrato 2026/118, com baixa automática no ERP.",
+    "Aprovação de crédito de R$ 62.000,00 para o cliente 4471, com carência de 6 meses e taxa pré-fixada.",
+    "Renegociação da dívida do cliente 88213: desconto de 35% sobre juros e parcelamento em 18 vezes.",
+    "Emissão de parecer de conformidade para o aditivo contratual nº 7 com a LogiTrans Transportes.",
+    "Cancelamento de multa contratual de R$ 21.300,00 aplicada ao fornecedor Metalúrgica Paraná.",
+  ];
+  const PRESETS = {
+    risco: { liability_clause: false, confidence_score: 0.4 },
+    limite: { liability_clause: true, confidence_score: 0.84 },
+    conforme: { liability_clause: true, confidence_score: 0.95 },
+  };
+  const docAleatorio = () => `DOC-DEMANDA-${Math.floor(1000 + Math.random() * 9000)}`;
+  const amostra = () => AMOSTRAS[Math.floor(Math.random() * AMOSTRAS.length)];
+
+  function prepararSimulador() {
+    $("#sim-doc").value = docAleatorio();
+    $("#sim-conteudo").value = amostra();
+  }
+
+  async function simular(dados) {
+    try {
+      const r = await api("/api/v1/intercept", { method: "POST", body: JSON.stringify(dados) });
+      const nv = r.violations.length;
+      avisar(nv ? `Proposta interceptada com ${plural(nv, "violação", "violações")}. Fator de pausa ativado.` : "Proposta interceptada sem violações. Pronta para chancela.", nv ? "atencao" : "ok");
+      estado.filtro = "pendentes";
+      await carregarFila();
+      await abrir(r.transaction_id, { rolar: true });
+      verificar();
+      prepararSimulador();
+    } catch (e) {
+      avisar(`Não foi possível interceptar: ${e.message}`, "erro");
+    }
+  }
+
+  // ── Eventos globais ────────────────────────────────
+  document.addEventListener("click", async (ev) => {
+    const copiar = ev.target.closest("[data-copiar]");
+    if (copiar) {
+      try { await navigator.clipboard.writeText(copiar.dataset.copiar); avisar("Copiado para a área de transferência."); }
+      catch { avisar("Não foi possível copiar. Selecione o texto manualmente.", "erro"); }
+      return;
+    }
+    const linha = ev.target.closest(".linha");
+    if (linha) { abrir(linha.dataset.id, { rolar: true }); return; }
+    const aba = ev.target.closest(".aba");
+    if (aba) { estado.filtro = aba.dataset.filtro; renderFila(); return; }
+    const preset = ev.target.closest(".preset");
+    if (preset) {
+      simular({ document_id: docAleatorio(), content: amostra(), ...PRESETS[preset.dataset.preset] });
+    }
+  });
+
+  $("#sim-conf").addEventListener("input", (ev) => { $("#sim-conf-v").value = num(ev.target.value); });
+  $("#form-sim").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    simular({
+      document_id: $("#sim-doc").value.trim(),
+      content: $("#sim-conteudo").value.trim(),
+      confidence_score: Number($("#sim-conf").value),
+      liability_clause: $("#sim-clausula").checked,
+    });
+  });
+  $("#integridade").addEventListener("click", verificar);
+  $("#tema").addEventListener("click", () => {
+    const raiz = document.documentElement;
+    const atual = raiz.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    raiz.dataset.theme = atual === "dark" ? "light" : "dark";
+    gravarLocal("calice.tema", raiz.dataset.theme);
+  });
+
+  // ── Início ─────────────────────────────────────────
+  (async function iniciar() {
+    prepararSimulador();
+    await carregarSaude();
+    try {
+      await carregarFila();
+    } catch (e) {
+      avisar(`Não foi possível carregar a fila: ${e.message}`, "erro");
+    }
+    verificar();
+    const primeira = estado.itens.find((i) => PENDENTES.has(i.status));
+    if (primeira) await abrir(primeira.transaction_id); else renderDetalhe();
+
+    setInterval(() => {
+      if (document.hidden || estado.ocupado) return;
+      carregarFila().catch(() => {});
+      verificar();
+    }, 8000);
+  })();
+})();
+</script>
+</body>
+</html>
