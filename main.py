@@ -7,8 +7,10 @@ Camada de governança human-in-the-loop para decisões de IA:
   2. O motor de regras diagnostica violações e, se houver, ativa o fator de pausa
   3. Um operador humano decide ............ POST /api/v1/seal   (chancela)
                                             POST /api/v1/reject (rejeição)
-  4. Cada evento entra num livro-razão append-only, encadeado e assinado (HMAC-SHA256)
+  4. Cada evento entra num livro-razão append-only, encadeado e assinado duas vezes:
+     HMAC-SHA256 (elo da cadeia) e Ed25519 (assinatura pública)
   5. Qualquer auditor confere o livro ..... GET  /api/v1/ledger/verify
+  6. Terceiros conferem sem segredo ....... GET  /api/v1/ledger/export + verificar_publico.py
 
 Só operadores autenticados decidem: POST /api/v1/auth/login troca login e senha por um
 token de sessão, exigido (Authorization: Bearer) na chancela e na rejeição. Contas são
@@ -16,6 +18,7 @@ criadas pela linha de comando:  python main.py operador criar <login> "<Nome com
 
 Configuração por variáveis de ambiente:
   CALICE_SIGNING_KEY           chave secreta das assinaturas (obrigatória em produção)
+  CALICE_ED25519_SEED          semente Ed25519 em hex (32 bytes); se ausente, derivada da anterior
   CALICE_DB_PATH               caminho do SQLite (padrão: ./calice.db)
   CALICE_CONFIDENCE_THRESHOLD  confiança mínima exigida da IA (padrão: 0.85)
   CALICE_SESSION_HOURS         validade do token de sessão, em horas (padrão: 8)
@@ -39,10 +42,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
+
+import verificar_publico as vp
 
 log = logging.getLogger("calice")
 
@@ -62,16 +69,39 @@ class Settings:
     dev_key: bool
     confidence_threshold: float
     session_hours: float
+    ed25519_key: Ed25519PrivateKey
+
+    @property
+    def chave_publica_hex(self) -> str:
+        return self.ed25519_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
+
+
+def carregar_ed25519(signing_key: bytes) -> Ed25519PrivateKey:
+    """Semente explícita em CALICE_ED25519_SEED ou, na falta dela, derivada da chave HMAC.
+
+    Derivar mantém instalações existentes funcionando com um segredo só; a semente
+    própria permite girar as duas chaves de forma independente.
+    """
+    semente_hex = os.getenv("CALICE_ED25519_SEED")
+    if semente_hex:
+        semente = bytes.fromhex(semente_hex.strip())
+        if len(semente) != 32:
+            raise ValueError("CALICE_ED25519_SEED deve ter 32 bytes (64 caracteres hex).")
+    else:
+        semente = hashlib.sha256(b"calice-ed25519-v1:" + signing_key).digest()
+    return Ed25519PrivateKey.from_private_bytes(semente)
 
 
 def load_settings() -> Settings:
     key = os.getenv("CALICE_SIGNING_KEY")
+    signing_key = (key or DEV_SIGNING_KEY).encode("utf-8")
     return Settings(
         db_path=os.getenv("CALICE_DB_PATH", str(BASE_DIR / "calice.db")),
-        signing_key=(key or DEV_SIGNING_KEY).encode("utf-8"),
+        signing_key=signing_key,
         dev_key=not key,
         confidence_threshold=float(os.getenv("CALICE_CONFIDENCE_THRESHOLD", "0.85")),
         session_hours=float(os.getenv("CALICE_SESSION_HOURS", "8")),
+        ed25519_key=carregar_ed25519(signing_key),
     )
 
 
@@ -172,9 +202,7 @@ def novo_id(prefixo: str) -> str:
     return f"{prefixo}-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:12].upper()}"
 
 
-def canonico(obj: Any) -> str:
-    """JSON determinístico: mesma entrada, mesmos bytes, mesmo hash."""
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+canonico = vp.canonico  # uma única definição, compartilhada com o verificador público
 
 
 def sha256_hex(texto: str) -> str:
@@ -208,7 +236,8 @@ CREATE TABLE IF NOT EXISTS ledger (
     dados      TEXT NOT NULL,
     prev_hash  TEXT NOT NULL,
     hash       TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    assinatura TEXT  -- Ed25519 (hex); NULL em registros anteriores à assinatura pública
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_tx ON ledger(tx_id);
 
@@ -230,7 +259,7 @@ CREATE TABLE IF NOT EXISTS sessoes (
 CREATE INDEX IF NOT EXISTS idx_sessoes_login ON sessoes(login);
 
 -- Defesa em profundidade contra bugs da aplicação (não contra quem tem o arquivo:
--- esse caso é coberto pela assinatura HMAC + /ledger/verify).
+-- esse caso é coberto pelas assinaturas HMAC e Ed25519 + /ledger/verify).
 CREATE TRIGGER IF NOT EXISTS ledger_sem_update BEFORE UPDATE ON ledger
 BEGIN SELECT RAISE(ABORT, 'ledger é append-only'); END;
 CREATE TRIGGER IF NOT EXISTS ledger_sem_delete BEFORE DELETE ON ledger
@@ -279,6 +308,9 @@ def init_db() -> None:
     with leitura() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        colunas = {c["name"] for c in conn.execute("PRAGMA table_info(ledger)")}
+        if "assinatura" not in colunas:  # bancos criados antes da assinatura pública
+            conn.execute("ALTER TABLE ledger ADD COLUMN assinatura TEXT")
 
 
 # ───────────────────────────── Autenticação ──────────────────────────────
@@ -412,12 +444,25 @@ def registrar_evento(conn: sqlite3.Connection, tx_id: str, evento: str,
     prev_hash = ultimo["hash"] if ultimo else GENESIS_HASH
     dados_json = canonico(dados)
     digest = assinar(seq, tx_id, evento, dados_json, prev_hash, created_at)
+    registro = {"seq": seq, "tx_id": tx_id, "evento": evento, "dados": dados_json,
+                "prev_hash": prev_hash, "hash": digest, "created_at": created_at}
+    assinatura = settings.ed25519_key.sign(vp.mensagem_assinada(registro)).hex()
     conn.execute(
-        "INSERT INTO ledger (seq, tx_id, evento, dados, prev_hash, hash, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (seq, tx_id, evento, dados_json, prev_hash, digest, created_at),
+        "INSERT INTO ledger (seq, tx_id, evento, dados, prev_hash, hash, created_at, assinatura) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (seq, tx_id, evento, dados_json, prev_hash, digest, created_at, assinatura),
     )
-    return {"seq": seq, "evento": evento, "prev_hash": prev_hash, "hash": digest, "created_at": created_at}
+    return {"seq": seq, "evento": evento, "prev_hash": prev_hash, "hash": digest,
+            "created_at": created_at, "assinatura": assinatura}
+
+
+def chave_publica() -> dict[str, str]:
+    pub = settings.chave_publica_hex
+    return {"algoritmo": vp.ALGORITMO, "hex": pub, "id": vp.id_chave(pub)}
+
+
+def registros_publicos(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    return [{c: r[c] for c in (*vp.CAMPOS, "assinatura")} for r in rows]
 
 
 def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -429,6 +474,7 @@ def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
 
     # 1) A cadeia em si: sequência contínua, encadeamento e assinatura de cada elo.
     prev = GENESIS_HASH
+    pub = vp.carregar_chave(settings.chave_publica_hex)
     eventos: dict[str, dict[str, sqlite3.Row]] = {}
     for ev in conn.execute("SELECT * FROM ledger ORDER BY seq"):
         total += 1
@@ -439,6 +485,9 @@ def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
         esperado = assinar(ev["seq"], ev["tx_id"], ev["evento"], ev["dados"], ev["prev_hash"], ev["created_at"])
         if not hmac.compare_digest(esperado, ev["hash"]):
             return falha(ev["seq"], "Assinatura inválida: o conteúdo do registro foi alterado.")
+        # Registros legados (sem Ed25519) seguem protegidos pelo HMAC acima.
+        if ev["assinatura"] is not None and not vp.assinatura_valida(pub, dict(ev)):
+            return falha(ev["seq"], "Assinatura Ed25519 inválida: registro alterado ou chave diferente.")
         eventos.setdefault(ev["tx_id"], {})[ev["evento"]] = ev
         prev = ev["hash"]
 
@@ -589,6 +638,8 @@ def _decidir(req: DecisionRequest, operador: Operador, aprovar: bool) -> dict[st
             "proof_hash": evento["hash"],
             "ledger_seq": evento["seq"],
             "padrao": PADRAO_SELO,
+            "assinatura": evento["assinatura"],
+            "chave_publica": chave_publica(),
         },
     }
 
@@ -647,7 +698,8 @@ def detalhar(tx_id: str) -> dict[str, Any]:
         if tx is None:
             raise HTTPException(404, "Transação não encontrada.")
         eventos = conn.execute(
-            "SELECT seq, evento, prev_hash, hash, created_at FROM ledger WHERE tx_id = ? ORDER BY seq",
+            "SELECT seq, evento, prev_hash, hash, created_at, assinatura FROM ledger "
+            "WHERE tx_id = ? ORDER BY seq",
             (tx_id,)).fetchall()
     d = serializar(tx, com_conteudo=True)
     d["ledger"] = [dict(e) for e in eventos]
@@ -661,12 +713,39 @@ def verificar() -> dict[str, Any]:
         return verificar_ledger(conn)
 
 
+@app.get("/api/v1/ledger/public-key")
+def ler_chave_publica() -> dict[str, Any]:
+    """Chave pública Ed25519 que confere todas as assinaturas do livro."""
+    return {**chave_publica(), "chave_desenvolvimento": settings.dev_key}
+
+
+@app.get("/api/v1/ledger/export")
+def exportar() -> dict[str, Any]:
+    """Livro completo, verificável offline com `verificar_publico.py` e a chave pública."""
+    with leitura() as conn:
+        rows = conn.execute("SELECT * FROM ledger ORDER BY seq").fetchall()
+    return {"chave_publica": chave_publica(), "exportado_em": agora(),
+            "registros": registros_publicos(rows)}
+
+
+@app.get("/api/v1/transactions/{tx_id}/proof")
+def provar(tx_id: str) -> dict[str, Any]:
+    """Prova de uma transação: seus registros assinados, sem o conteúdo (só o hash dele)."""
+    with leitura() as conn:
+        rows = conn.execute("SELECT * FROM ledger WHERE tx_id = ? ORDER BY seq", (tx_id,)).fetchall()
+    if not rows:
+        raise HTTPException(404, "Transação não encontrada.")
+    return {"transaction_id": tx_id, "chave_publica": chave_publica(),
+            "registros": registros_publicos(rows)}
+
+
 @app.get("/api/v1/health")
 def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "versao": app.version,
         "chave_desenvolvimento": settings.dev_key,
+        "chave_publica_id": vp.id_chave(settings.chave_publica_hex),
         "limiar_confianca": settings.confidence_threshold,
         "regras": [r.__name__ for r in REGRAS],
         "padrao": PADRAO_SELO,
