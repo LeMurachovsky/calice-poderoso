@@ -24,6 +24,8 @@ Abra http://127.0.0.1:8000 (interface) ou http://127.0.0.1:8000/docs (Swagger).
 | `CALICE_DB_PATH` | `./calice.db` | Caminho do SQLite |
 | `CALICE_CONFIDENCE_THRESHOLD` | `0.85` | Confiança mínima exigida da IA |
 | `CALICE_SESSION_HOURS` | `8` | Validade do token de sessão do operador, em horas |
+| `CALICE_JANELA_LOW` / `_MEDIUM` / `_HIGH` | `300` / `1800` / `7200` | Janela exclusiva do plantonista, em segundos, por nível de risco |
+| `CALICE_VARREDURA_SEGUNDOS` | `15` | Intervalo da varredura que registra prazos esgotados |
 
 Guarde as chaves: trocá-las invalida a verificação de todo o livro já gravado. Para gerar uma semente Ed25519 própria: `python -c 'import secrets; print(secrets.token_hex(32))'`.
 
@@ -40,6 +42,15 @@ python main.py operador listar
 ```
 
 Senhas ficam com scrypt (sal individual); tokens de sessão são aleatórios e o banco guarda só o SHA-256 deles. Na interface, o operador entra no painel "Juízo humano"; a sessão vive só na aba aberta.
+
+## Janelas temporais e plantão
+
+A IA pode informar `risk_level` (`LOW`, `MEDIUM` ou `HIGH`; padrão `MEDIUM`) e `designated_operator` (login do operador de plantão). O prazo da janela vem da configuração do nível de risco, não da IA.
+
+- Enquanto a janela está aberta, só o plantonista chancela ou rejeita; outro operador recebe 403.
+- Quando o prazo vence sem decisão, o livro registra `PRAZO_ESGOTADO` (pela varredura periódica ou na primeira tentativa de decisão) e qualquer operador autenticado passa a poder decidir.
+- O silêncio não aprova: a proposta continua parada até alguém chancelar ou rejeitar. Cada decisão registra `dentro_da_janela`.
+- O prazo fica no SQLite, então reiniciar o serviço não perde janelas.
 
 ## Endpoints
 

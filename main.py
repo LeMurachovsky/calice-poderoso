@@ -15,6 +15,11 @@ Camada de governança human-in-the-loop para decisões de IA:
        registra o desfecho ................ POST /api/v1/topics/{topic_id}/outcomes
        monta o contexto da próxima janela . GET  /api/v1/topics/{topic_id}/context
 
+Janelas temporais: cada proposta traz um nível de risco (LOW, MEDIUM, HIGH) e, opcionalmente,
+o login do operador de plantão. Durante a janela do nível, só o plantonista decide; esgotado o
+prazo, o livro registra PRAZO_ESGOTADO e a decisão passa a qualquer operador autenticado.
+O silêncio nunca aprova: sem chancela humana a proposta continua parada.
+
 Só operadores autenticados decidem: POST /api/v1/auth/login troca login e senha por um
 token de sessão, exigido (Authorization: Bearer) na chancela e na rejeição. Contas são
 criadas pela linha de comando:  python main.py operador criar <login> "<Nome completo>"
@@ -25,9 +30,14 @@ Configuração por variáveis de ambiente:
   CALICE_DB_PATH               caminho do SQLite (padrão: ./calice.db)
   CALICE_CONFIDENCE_THRESHOLD  confiança mínima exigida da IA (padrão: 0.85)
   CALICE_SESSION_HOURS         validade do token de sessão, em horas (padrão: 8)
+  CALICE_JANELA_LOW            janela do plantonista, em segundos, por risco (padrão: 300)
+  CALICE_JANELA_MEDIUM                                                  (padrão: 1800)
+  CALICE_JANELA_HIGH                                                    (padrão: 7200)
+  CALICE_VARREDURA_SEGUNDOS    intervalo da varredura de prazos esgotados (padrão: 15)
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -73,6 +83,8 @@ class Settings:
     dev_key: bool
     confidence_threshold: float
     session_hours: float
+    janelas: dict[str, int]
+    varredura_segundos: float
     ed25519_key: Ed25519PrivateKey
 
     @property
@@ -96,6 +108,15 @@ def carregar_ed25519(signing_key: bytes) -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(semente)
 
 
+class Risco(str, Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+JANELAS_PADRAO = {Risco.LOW: "300", Risco.MEDIUM: "1800", Risco.HIGH: "7200"}
+
+
 def load_settings() -> Settings:
     key = os.getenv("CALICE_SIGNING_KEY")
     signing_key = (key or DEV_SIGNING_KEY).encode("utf-8")
@@ -105,6 +126,9 @@ def load_settings() -> Settings:
         dev_key=not key,
         confidence_threshold=float(os.getenv("CALICE_CONFIDENCE_THRESHOLD", "0.85")),
         session_hours=float(os.getenv("CALICE_SESSION_HOURS", "8")),
+        janelas={r.value: int(os.getenv(f"CALICE_JANELA_{r.value}", padrao))
+                 for r, padrao in JANELAS_PADRAO.items()},
+        varredura_segundos=float(os.getenv("CALICE_VARREDURA_SEGUNDOS", "15")),
         ed25519_key=carregar_ed25519(signing_key),
     )
 
@@ -136,6 +160,11 @@ class InterceptRequest(BaseModel):
     content: str = Field(min_length=1, max_length=20_000)
     liability_clause: bool
     confidence_score: float = Field(ge=0.0, le=1.0)
+    risk_level: Risco = Risco.MEDIUM
+    designated_operator: Optional[str] = Field(
+        default=None, max_length=64,
+        description="Login do operador de plantão: só ele decide enquanto a janela estiver aberta.",
+    )
 
 
 class LoginRequest(BaseModel):
@@ -244,7 +273,11 @@ CREATE TABLE IF NOT EXISTS transacoes (
     operador         TEXT,
     justificativa    TEXT,
     decided_at       TEXT,
-    proof_hash       TEXT UNIQUE
+    proof_hash       TEXT UNIQUE,
+    risco            TEXT,
+    agente_designado TEXT,
+    prazo            TEXT,
+    prazo_esgotado_em TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_transacoes_status ON transacoes(status);
 
@@ -344,6 +377,11 @@ def init_db() -> None:
         colunas = {c["name"] for c in conn.execute("PRAGMA table_info(ledger)")}
         if "assinatura" not in colunas:  # bancos criados antes da assinatura pública
             conn.execute("ALTER TABLE ledger ADD COLUMN assinatura TEXT")
+        colunas = {c["name"] for c in conn.execute("PRAGMA table_info(transacoes)")}
+        for coluna in ("risco", "agente_designado", "prazo", "prazo_esgotado_em"):
+            if coluna not in colunas:  # bancos criados antes das janelas temporais
+                conn.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transacoes_prazo ON transacoes(prazo)")
 
 
 # ───────────────────────────── Autenticação ──────────────────────────────
@@ -558,6 +596,58 @@ def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
             "falha": None, "verificado_em": agora()}
 
 
+# ─────────────────────────── Janelas temporais ───────────────────────────
+
+def calcular_prazo(risco: Risco, inicio: str) -> str:
+    fim = datetime.fromisoformat(inicio) + timedelta(seconds=settings.janelas[risco.value])
+    return fim.isoformat(timespec="milliseconds")
+
+
+def esgotar_prazo(conn: sqlite3.Connection, tx: sqlite3.Row) -> sqlite3.Row:
+    """Registra PRAZO_ESGOTADO se a janela venceu sem decisão. Deve rodar dentro de `escrita()`.
+
+    Esgotar não aprova nem rejeita nada: só encerra a exclusividade do plantonista e
+    deixa no livro que ele não decidiu a tempo.
+    """
+    momento = agora()
+    if tx["status"] in FINAIS or tx["prazo_esgotado_em"] or not tx["prazo"] or tx["prazo"] > momento:
+        return tx
+    registrar_evento(conn, tx["tx_id"], "PRAZO_ESGOTADO", {
+        "risco": tx["risco"],
+        "operador_de_plantao": tx["agente_designado"],
+        "prazo": tx["prazo"],
+        "status": tx["status"],
+    }, momento)
+    conn.execute("UPDATE transacoes SET prazo_esgotado_em = ? WHERE tx_id = ?", (momento, tx["tx_id"]))
+    return conn.execute("SELECT * FROM transacoes WHERE tx_id = ?", (tx["tx_id"],)).fetchone()
+
+
+def varrer_prazos() -> int:
+    """Registra o esgotamento de todas as janelas vencidas. Devolve quantas foram esgotadas.
+
+    O prazo mora no banco, então um reinício não perde janelas: a próxima varredura
+    (ou a próxima tentativa de decisão) as encontra.
+    """
+    with escrita() as conn:
+        vencidas = conn.execute(
+            "SELECT * FROM transacoes WHERE prazo_esgotado_em IS NULL AND prazo <= ? "
+            f"AND status NOT IN ({','.join('?' * len(FINAIS))}) ORDER BY prazo, rowid",
+            (agora(), *sorted(FINAIS))).fetchall()
+        for tx in vencidas:
+            esgotar_prazo(conn, tx)
+    return len(vencidas)
+
+
+async def varredura_continua() -> None:
+    while True:
+        await asyncio.sleep(settings.varredura_segundos)
+        try:
+            if n := await asyncio.to_thread(varrer_prazos):
+                log.warning("%d janela(s) de plantão esgotada(s) sem decisão.", n)
+        except Exception:  # a varredura não pode morrer por um erro pontual
+            log.exception("Falha na varredura de prazos.")
+
+
 # ──────────────────── Sincronização entre janelas ────────────────────────
 #
 # Várias janelas (sessões de IA) podem tratar do mesmo assunto ao mesmo tempo. Para que
@@ -640,6 +730,12 @@ def serializar(tx: sqlite3.Row, com_conteudo: bool = False) -> dict[str, Any]:
         "liability_clause": bool(tx["liability_clause"]),
         "violations": json.loads(tx["violations"]),
         "created_at": tx["created_at"],
+        "janela": {
+            "risco": tx["risco"],
+            "operador_de_plantao": tx["agente_designado"],
+            "prazo": tx["prazo"],
+            "prazo_esgotado_em": tx["prazo_esgotado_em"],
+        },
         "decisao": None,
     }
     if tx["decisao_id"]:
@@ -665,7 +761,11 @@ async def lifespan(_: FastAPI):
     if settings.dev_key:
         log.warning("CALICE_SIGNING_KEY não definida: usando chave de DESENVOLVIMENTO. "
                     "Selos emitidos assim não têm valor fora deste ambiente.")
-    yield
+    varredura = asyncio.create_task(varredura_continua())
+    try:
+        yield
+    finally:
+        varredura.cancel()
 
 
 app = FastAPI(title="Cálice Poderoso — Core Engine", version="2.0.0", lifespan=lifespan)
@@ -677,13 +777,20 @@ def intercept(req: InterceptRequest) -> dict[str, Any]:
     status = Status.PAUSA if violacoes else Status.PRONTO
     tx_id = novo_id("TX")
     created_at = agora()
+    prazo = calcular_prazo(req.risk_level, created_at)
+    plantao = req.designated_operator.lower() if req.designated_operator else None
 
     with escrita() as conn:
+        if plantao and conn.execute(
+                "SELECT 1 FROM operadores WHERE login = ? AND ativo = 1", (plantao,)).fetchone() is None:
+            raise HTTPException(422, f"Operador de plantão '{plantao}' não existe ou está desativado.")
         conn.execute(
             "INSERT INTO transacoes (tx_id, document_id, content, liability_clause, "
-            "confidence_score, status, violations, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "confidence_score, status, violations, created_at, risco, agente_designado, prazo) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (tx_id, req.document_id, req.content, int(req.liability_clause), req.confidence_score,
-             status.value, canonico([asdict(v) for v in violacoes]), created_at),
+             status.value, canonico([asdict(v) for v in violacoes]), created_at,
+             req.risk_level.value, plantao, prazo),
         )
         evento = registrar_evento(conn, tx_id, "INTERCEPTACAO", {
             "document_id": req.document_id,
@@ -693,13 +800,19 @@ def intercept(req: InterceptRequest) -> dict[str, Any]:
             "confidence_threshold": settings.confidence_threshold,
             "violations": [asdict(v) for v in violacoes],
             "status": status.value,
+            "risco": req.risk_level.value,
+            "operador_de_plantao": plantao,
+            "janela_segundos": settings.janelas[req.risk_level.value],
+            "prazo": prazo,
         }, created_at)
 
     return {
         "transaction_id": tx_id,
         "status": status.value,
         "violations": [asdict(v) for v in violacoes],
-        "input_data": req.model_dump(),
+        "janela": {"risco": req.risk_level.value, "operador_de_plantao": plantao,
+                   "janela_segundos": settings.janelas[req.risk_level.value], "prazo": prazo},
+        "input_data": req.model_dump(mode="json"),
         "hash_intermediario": evento["hash"],
         "ledger": evento,
     }
@@ -712,6 +825,15 @@ def _decidir(req: DecisionRequest, operador: Operador, aprovar: bool) -> dict[st
             raise HTTPException(404, "Transação não encontrada.")
         if tx["status"] in FINAIS:
             raise HTTPException(409, f"Conflito: esta transação já foi decidida ({tx['status']}).")
+
+        tx = esgotar_prazo(conn, tx)
+        dentro_da_janela = tx["prazo_esgotado_em"] is None
+        if tx["agente_designado"] and dentro_da_janela and operador.login != tx["agente_designado"]:
+            raise HTTPException(403, {
+                "mensagem": "Janela de plantão aberta: só o operador designado decide até o prazo.",
+                "operador_de_plantao": tx["agente_designado"],
+                "prazo": tx["prazo"],
+            })
 
         codigos = {v["codigo"] for v in json.loads(tx["violations"])}
         if aprovar:
@@ -731,6 +853,7 @@ def _decidir(req: DecisionRequest, operador: Operador, aprovar: bool) -> dict[st
             "operador_login": operador.login,
             "justificativa": req.notes,
             "violacoes_reconhecidas": sorted(codigos & set(req.acknowledged_violations)),
+            "dentro_da_janela": dentro_da_janela,
             "status_anterior": tx["status"],
             "status": novo_status.value,
         }, decided_at)
@@ -883,6 +1006,7 @@ def health() -> dict[str, Any]:
         "chave_desenvolvimento": settings.dev_key,
         "chave_publica_id": vp.id_chave(settings.chave_publica_hex),
         "limiar_confianca": settings.confidence_threshold,
+        "janelas_segundos": settings.janelas,
         "regras": [r.__name__ for r in REGRAS],
         "padrao": PADRAO_SELO,
     }

@@ -404,6 +404,110 @@ def test_cli_cria_operador(anonimo, monkeypatch, capsys):
     entrar(anonimo, "joao", "senha-do-joao-123")
 
 
+# ── Janelas temporais e plantão ──────────────────────────────────────────
+
+@pytest.fixture
+def plantao(anonimo):
+    """Duas operadoras: `marina` (plantonista) e `joana` (outra operadora)."""
+    main.criar_operador("joana", "Outra Operadora", SENHA)
+    return anonimo
+
+
+def com_plantao(risco="HIGH", **extra) -> dict:
+    return {**CONFORME, "risk_level": risco, "designated_operator": "marina", **extra}
+
+
+def test_intercept_registra_risco_plantonista_e_prazo(plantao):
+    tx = interceptar(plantao, com_plantao())
+    assert tx["janela"]["risco"] == "HIGH"
+    assert tx["janela"]["operador_de_plantao"] == "marina"
+    assert tx["janela"]["janela_segundos"] == main.settings.janelas["HIGH"]
+    dados = plantao.get(f"/api/v1/transactions/{tx['transaction_id']}").json()
+    assert dados["janela"]["prazo"] == tx["janela"]["prazo"]
+    assert dados["janela"]["prazo_esgotado_em"] is None
+
+
+def test_risco_padrao_e_medium_sem_plantonista(client):
+    tx = interceptar(client)
+    assert tx["janela"]["risco"] == "MEDIUM"
+    assert tx["janela"]["operador_de_plantao"] is None
+
+
+def test_plantonista_inexistente_e_recusado(plantao):
+    r = plantao.post("/api/v1/intercept", json=com_plantao(designated_operator="ninguem"))
+    assert r.status_code == 422
+
+
+def test_risco_invalido_e_recusado(plantao):
+    assert plantao.post("/api/v1/intercept", json=com_plantao(risco="EXTREMO")).status_code == 422
+
+
+def test_dentro_da_janela_so_o_plantonista_decide(plantao):
+    tx = interceptar(plantao, com_plantao())
+    outra = plantao.post("/api/v1/seal", json=decisao(tx["transaction_id"]), headers=bearer(entrar(plantao, "joana")))
+    assert outra.status_code == 403
+    assert outra.json()["detail"]["operador_de_plantao"] == "marina"
+    dona = plantao.post("/api/v1/seal", json=decisao(tx["transaction_id"]), headers=bearer(entrar(plantao)))
+    assert dona.status_code == 200, dona.text
+
+
+def test_prazo_esgotado_nao_aprova_e_libera_outros_operadores(plantao, monkeypatch):
+    monkeypatch.setitem(main.settings.janelas, "HIGH", 0)
+    tx = interceptar(plantao, com_plantao())
+
+    assert main.varrer_prazos() == 1
+    assert main.varrer_prazos() == 0  # registrado uma vez só
+    dados = plantao.get(f"/api/v1/transactions/{tx['transaction_id']}").json()
+    assert dados["status"] == "PRONTO_PARA_CHANCELA"  # o silêncio não aprova
+    assert dados["decisao"] is None
+    assert [e["evento"] for e in dados["ledger"]] == ["INTERCEPTACAO", "PRAZO_ESGOTADO"]
+
+    r = plantao.post("/api/v1/seal", json=decisao(tx["transaction_id"]), headers=bearer(entrar(plantao, "joana")))
+    assert r.status_code == 200, r.text
+    assert r.json()["juizo_humano"]["operator_login"] == "joana"
+    assert plantao.get("/api/v1/ledger/verify").json()["integro"] is True
+
+
+def test_decisao_apos_prazo_registra_esgotamento_antes(plantao, monkeypatch):
+    """Sem varredura, a própria decisão registra o esgotamento antes da chancela."""
+    monkeypatch.setitem(main.settings.janelas, "LOW", 0)
+    tx = interceptar(plantao, com_plantao("LOW"))
+    r = plantao.post("/api/v1/reject", json=decisao(tx["transaction_id"]), headers=bearer(entrar(plantao, "joana")))
+    assert r.status_code == 200, r.text
+    eventos = plantao.get(f"/api/v1/transactions/{tx['transaction_id']}").json()["ledger"]
+    assert [e["evento"] for e in eventos] == ["INTERCEPTACAO", "PRAZO_ESGOTADO", "REJEICAO"]
+
+
+def test_varredura_ignora_transacoes_decididas(plantao, monkeypatch):
+    monkeypatch.setitem(main.settings.janelas, "HIGH", 0)
+    tx = interceptar(plantao, com_plantao())
+    main.varrer_prazos()
+    plantao.post("/api/v1/seal", json=decisao(tx["transaction_id"]), headers=bearer(entrar(plantao)))
+    interceptar(plantao, com_plantao())
+    assert main.varrer_prazos() == 1  # só a nova
+
+
+def test_janelas_configuraveis_por_ambiente(tmp_path, monkeypatch):
+    monkeypatch.setenv("CALICE_JANELA_HIGH", "42")
+    assert main.load_settings().janelas["HIGH"] == 42
+
+
+def test_banco_legado_ganha_colunas_de_janela(tmp_path, monkeypatch):
+    db = tmp_path / "legado.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE transacoes (tx_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, "
+                 "content TEXT NOT NULL, liability_clause INTEGER NOT NULL, confidence_score REAL NOT NULL, "
+                 "status TEXT NOT NULL, violations TEXT NOT NULL, created_at TEXT NOT NULL, decisao_id TEXT UNIQUE, "
+                 "operador TEXT, justificativa TEXT, decided_at TEXT, proof_hash TEXT UNIQUE)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("CALICE_DB_PATH", str(db))
+    monkeypatch.setenv("CALICE_SIGNING_KEY", "chave-de-teste")
+    with TestClient(main.app) as c:
+        assert main.varrer_prazos() == 0
+        assert interceptar(c)["janela"]["risco"] == "MEDIUM"
+
+
 # ── Sincronização entre janelas ───────────────────────────────────────────
 
 TOPICO = "contrato-fornecedor-42"
