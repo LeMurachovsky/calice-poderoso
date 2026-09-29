@@ -57,6 +57,8 @@ Senhas ficam com scrypt (sal individual); tokens de sessão são aleatórios e o
 | GET | `/api/v1/ledger/verify` | Verifica sequência, encadeamento, assinaturas e consistência |
 | GET | `/api/v1/ledger/public-key` | Chave pública Ed25519 (hex) e sua impressão digital |
 | GET | `/api/v1/ledger/export` | Livro completo com as assinaturas Ed25519 |
+| POST | `/api/v1/topics/{topic_id}/outcomes` | Publica no tópico o desfecho de uma transação chancelada (exige token; 409 se não chancelada ou repetida) |
+| GET | `/api/v1/topics/{topic_id}/context` | Linha do tempo chancelada do tópico, em lista e em texto pronto para o prompt |
 | GET | `/api/v1/health` | Saúde do serviço |
 
 Exemplo de chancela:
@@ -86,6 +88,20 @@ python verificar_publico.py livro.json --chave <hex>     # sai com 0 se íntegro
 
 Registros gravados antes desta versão não têm assinatura Ed25519: continuam protegidos pelo HMAC no `/ledger/verify`, mas a verificação pública os aponta como não assinados.
 
+## Sincronização entre janelas
+
+Quando várias janelas (sessões de IA) tratam do mesmo assunto, cada desfecho chancelado pode ser publicado num tópico, e a janela seguinte recebe o que já foi fixado antes de começar:
+
+```bash
+curl -X POST localhost:8000/api/v1/topics/contrato-42/outcomes -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -d '{
+    "transaction_id": "TX-...", "janela": "janela-A", "dados": {"prazo_dias": 30}
+  }'
+curl -s localhost:8000/api/v1/topics/contrato-42/context   # campo "contexto": texto para o prompt da janela B
+```
+
+Só entra no tópico uma transação `CHANCELADO_E_CONCLUIDO`; a certidão é o `proof_hash` da chancela, lido do banco. Cada publicação vira um evento `SINCRONIZACAO` no livro (assinado e coberto pelo `/ledger/verify`), e a tabela `desfechos_topico` é só o índice por tópico.
+
 ## Adicionando uma regra
 
 Uma regra é uma função decorada com `@regra` que devolve `Violacao` ou `None`. Não precisa mexer em mais nada do backend:
@@ -109,7 +125,7 @@ Na interface, acrescente o nome legível em `NOMES` (`static/index.html`); sem i
 pytest -q
 ```
 
-Cobrem validação, autenticação do operador (sem token, token inválido ou expirado, operador desativado, nome forjado no corpo), ciência obrigatória, duplicidade (409), concorrência (8 chancelas simultâneas → exatamente uma passa), encadeamento linear, detecção de adulteração no livro, na projeção e com chave errada, e a verificação pública Ed25519 (exportação, prova de selo, registros alterados, removidos ou reordenados, chave trocada e banco legado).
+Cobrem validação, autenticação do operador (sem token, token inválido ou expirado, operador desativado, nome forjado no corpo), ciência obrigatória, duplicidade (409), concorrência (8 chancelas simultâneas → exatamente uma passa), encadeamento linear, detecção de adulteração no livro, na projeção e com chave errada, e a verificação pública Ed25519 (exportação, prova de selo, registros alterados, removidos ou reordenados, chave trocada e banco legado), e a sincronização entre janelas (só chancelados, sem repetição, isolamento por tópico, identificadores que não forjam linhas no contexto e adulteração do índice).
 
 Para ver a detecção na prática, altere um registro direto no banco (os triggers bloqueiam `UPDATE`, então remova-os antes, simulando um atacante com acesso ao arquivo) e chame `/api/v1/ledger/verify`: a resposta aponta o `seq` adulterado, e a interface exibe o alerta.
 
