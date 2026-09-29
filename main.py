@@ -11,12 +11,20 @@ Camada de governança human-in-the-loop para decisões de IA:
      HMAC-SHA256 (elo da cadeia) e Ed25519 (assinatura pública)
   5. Qualquer auditor confere o livro ..... GET  /api/v1/ledger/verify
   6. Terceiros conferem sem segredo ....... GET  /api/v1/ledger/export + verificar_publico.py
+  7. Janelas concorrentes compartilham o que já foi chancelado num tópico:
+       registra o desfecho ................ POST /api/v1/topics/{topic_id}/outcomes
+       monta o contexto da próxima janela . GET  /api/v1/topics/{topic_id}/context
+
+Só operadores autenticados decidem: POST /api/v1/auth/login troca login e senha por um
+token de sessão, exigido (Authorization: Bearer) na chancela e na rejeição. Contas são
+criadas pela linha de comando:  python main.py operador criar <login> "<Nome completo>"
 
 Configuração por variáveis de ambiente:
   CALICE_SIGNING_KEY           chave secreta das assinaturas (obrigatória em produção)
   CALICE_ED25519_SEED          semente Ed25519 em hex (32 bytes); se ausente, derivada da anterior
   CALICE_DB_PATH               caminho do SQLite (padrão: ./calice.db)
   CALICE_CONFIDENCE_THRESHOLD  confiança mínima exigida da IA (padrão: 0.85)
+  CALICE_SESSION_HOURS         validade do token de sessão, em horas (padrão: 8)
 """
 from __future__ import annotations
 
@@ -25,20 +33,24 @@ import hmac
 import json
 import logging
 import os
+import re
+import secrets
 import sqlite3
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Optional
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Path as PathParam
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 import verificar_publico as vp
@@ -60,6 +72,7 @@ class Settings:
     signing_key: bytes
     dev_key: bool
     confidence_threshold: float
+    session_hours: float
     ed25519_key: Ed25519PrivateKey
 
     @property
@@ -91,6 +104,7 @@ def load_settings() -> Settings:
         signing_key=signing_key,
         dev_key=not key,
         confidence_threshold=float(os.getenv("CALICE_CONFIDENCE_THRESHOLD", "0.85")),
+        session_hours=float(os.getenv("CALICE_SESSION_HOURS", "8")),
         ed25519_key=carregar_ed25519(signing_key),
     )
 
@@ -110,6 +124,11 @@ FINAIS = {Status.CHANCELADO.value, Status.REJEITADO.value}
 
 # ─────────────────────────────── Contratos ───────────────────────────────
 
+# Tópicos e janelas entram no texto do contexto: sem espaços nem quebras de linha,
+# para que um identificador não consiga forjar linhas de "fatos chancelados".
+IDENTIFICADOR_VALIDO = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$"
+MAX_DADOS_DESFECHO = 10_000
+
 class InterceptRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -119,11 +138,28 @@ class InterceptRequest(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0)
 
 
-class DecisionRequest(BaseModel):
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    login: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class DesfechoRequest(BaseModel):
+    """Desfecho de uma janela, amarrado a uma transação já chancelada."""
     model_config = ConfigDict(str_strip_whitespace=True)
 
     transaction_id: str = Field(min_length=1)
-    operator_name: str = Field(min_length=3, max_length=120)
+    janela: str = Field(min_length=1, max_length=120, pattern=IDENTIFICADOR_VALIDO,
+                        description="Identificador da janela (sessão/conversa) de origem.")
+    dados: dict[str, Any] = Field(description="Parâmetros fixados pela janela.")
+
+
+class DecisionRequest(BaseModel):
+    """O operador não é informado aqui: ele vem da sessão autenticada."""
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    transaction_id: str = Field(min_length=1)
     notes: str = Field(
         min_length=15, max_length=2_000,
         description="Justificativa obrigatória: é ela que materializa o juízo humano.",
@@ -224,6 +260,37 @@ CREATE TABLE IF NOT EXISTS ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_tx ON ledger(tx_id);
 
+-- Projeção dos eventos SINCRONIZACAO do livro, indexada por tópico (como `transacoes`).
+CREATE TABLE IF NOT EXISTS desfechos_topico (
+    ledger_seq      INTEGER PRIMARY KEY REFERENCES ledger(seq),
+    topic_id        TEXT NOT NULL,
+    janela          TEXT NOT NULL,
+    tx_id           TEXT NOT NULL REFERENCES transacoes(tx_id),
+    dados           TEXT NOT NULL,
+    hash_certidao   TEXT NOT NULL,
+    operador_login  TEXT NOT NULL,
+    sincronizado_em TEXT NOT NULL,
+    UNIQUE (topic_id, tx_id)
+);
+CREATE INDEX IF NOT EXISTS idx_desfechos_topico ON desfechos_topico(topic_id, ledger_seq);
+
+CREATE TABLE IF NOT EXISTS operadores (
+    login      TEXT PRIMARY KEY,
+    nome       TEXT NOT NULL,
+    senha_hash TEXT NOT NULL,
+    ativo      INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+
+-- Guarda só o SHA-256 do token: quem lê o arquivo não consegue usar sessões vivas.
+CREATE TABLE IF NOT EXISTS sessoes (
+    token_sha256 TEXT PRIMARY KEY,
+    login        TEXT NOT NULL REFERENCES operadores(login),
+    created_at   TEXT NOT NULL,
+    expira_em    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessoes_login ON sessoes(login);
+
 -- Defesa em profundidade contra bugs da aplicação (não contra quem tem o arquivo:
 -- esse caso é coberto pelas assinaturas HMAC e Ed25519 + /ledger/verify).
 CREATE TRIGGER IF NOT EXISTS ledger_sem_update BEFORE UPDATE ON ledger
@@ -279,6 +346,119 @@ def init_db() -> None:
             conn.execute("ALTER TABLE ledger ADD COLUMN assinatura TEXT")
 
 
+# ───────────────────────────── Autenticação ──────────────────────────────
+
+LOGIN_VALIDO = r"^[a-z0-9][a-z0-9._-]{2,63}$"
+SCRYPT_N, SCRYPT_R, SCRYPT_P = 2**14, 8, 1
+
+
+@dataclass(frozen=True)
+class Operador:
+    login: str
+    nome: str
+
+
+def hash_senha(senha: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(senha.encode("utf-8"), salt=salt, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P)
+    return f"scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${salt.hex()}${digest.hex()}"
+
+
+def conferir_senha(senha: str, armazenado: str) -> bool:
+    try:
+        algoritmo, n, r, p, salt, digest = armazenado.split("$")
+    except ValueError:
+        return False
+    if algoritmo != "scrypt":
+        return False
+    calculado = hashlib.scrypt(senha.encode("utf-8"), salt=bytes.fromhex(salt),
+                               n=int(n), r=int(r), p=int(p))
+    return hmac.compare_digest(calculado.hex(), digest)
+
+
+# Conferida quando o login não existe, para que o tempo de resposta não revele quais logins existem.
+_HASH_FICTICIO = hash_senha(secrets.token_hex(16))
+
+
+def criar_operador(login: str, nome: str, senha: str) -> Operador:
+    login = login.strip().lower()
+    nome = " ".join(nome.split())
+    if not re.fullmatch(LOGIN_VALIDO, login):
+        raise ValueError("Login inválido: 3 a 64 caracteres entre a-z, 0-9, '.', '_' e '-'.")
+    if not 3 <= len(nome) <= 120:
+        raise ValueError("O nome deve ter entre 3 e 120 caracteres.")
+    if len(senha) < 12:
+        raise ValueError("A senha deve ter pelo menos 12 caracteres.")
+    with escrita() as conn:
+        if conn.execute("SELECT 1 FROM operadores WHERE login = ?", (login,)).fetchone():
+            raise ValueError(f"O login '{login}' já existe.")
+        conn.execute("INSERT INTO operadores (login, nome, senha_hash, ativo, created_at) "
+                     "VALUES (?, ?, ?, 1, ?)", (login, nome, hash_senha(senha), agora()))
+    return Operador(login, nome)
+
+
+def definir_senha(login: str, senha: str) -> None:
+    if len(senha) < 12:
+        raise ValueError("A senha deve ter pelo menos 12 caracteres.")
+    with escrita() as conn:
+        if conn.execute("UPDATE operadores SET senha_hash = ? WHERE login = ?",
+                        (hash_senha(senha), login)).rowcount == 0:
+            raise ValueError(f"O login '{login}' não existe.")
+        conn.execute("DELETE FROM sessoes WHERE login = ?", (login,))
+
+
+def definir_ativo(login: str, ativo: bool) -> None:
+    with escrita() as conn:
+        if conn.execute("UPDATE operadores SET ativo = ? WHERE login = ?",
+                        (int(ativo), login)).rowcount == 0:
+            raise ValueError(f"O login '{login}' não existe.")
+        if not ativo:
+            conn.execute("DELETE FROM sessoes WHERE login = ?", (login,))
+
+
+def abrir_sessao(login: str, senha: str) -> tuple[str, str, Operador] | None:
+    """Confere a senha e devolve (token, expira_em, operador), ou None se não conferir."""
+    with leitura() as conn:
+        op = conn.execute("SELECT * FROM operadores WHERE login = ?", (login.lower(),)).fetchone()
+    senha_ok = conferir_senha(senha, op["senha_hash"] if op else _HASH_FICTICIO)
+    if op is None or not senha_ok or not op["ativo"]:
+        return None
+    token = secrets.token_urlsafe(32)
+    criada = datetime.now(timezone.utc)
+    expira_em = (criada + timedelta(hours=settings.session_hours)).isoformat(timespec="milliseconds")
+    with escrita() as conn:
+        conn.execute("DELETE FROM sessoes WHERE expira_em <= ?", (agora(),))
+        conn.execute("INSERT INTO sessoes (token_sha256, login, created_at, expira_em) VALUES (?, ?, ?, ?)",
+                     (sha256_hex(token), op["login"], criada.isoformat(timespec="milliseconds"), expira_em))
+    return token, expira_em, Operador(op["login"], op["nome"])
+
+
+def fechar_sessao(token: str) -> None:
+    with escrita() as conn:
+        conn.execute("DELETE FROM sessoes WHERE token_sha256 = ?", (sha256_hex(token),))
+
+
+_bearer = HTTPBearer(auto_error=False)
+NAO_AUTENTICADO = {"WWW-Authenticate": "Bearer"}
+
+
+def token_da_requisicao(cred: Optional[HTTPAuthorizationCredentials] = Depends(_bearer)) -> str:
+    if cred is None or cred.scheme.lower() != "bearer" or not cred.credentials:
+        raise HTTPException(401, "Autenticação necessária: faça login como operador.", headers=NAO_AUTENTICADO)
+    return cred.credentials
+
+
+def operador_autenticado(token: str = Depends(token_da_requisicao)) -> Operador:
+    with leitura() as conn:
+        row = conn.execute(
+            "SELECT o.login, o.nome FROM sessoes s JOIN operadores o ON o.login = s.login "
+            "WHERE s.token_sha256 = ? AND s.expira_em > ? AND o.ativo = 1",
+            (sha256_hex(token), agora())).fetchone()
+    if row is None:
+        raise HTTPException(401, "Sessão inválida ou expirada: faça login novamente.", headers=NAO_AUTENTICADO)
+    return Operador(row["login"], row["nome"])
+
+
 # ────────────────────────────── Livro-razão ──────────────────────────────
 
 def assinar(seq: int, tx_id: str, evento: str, dados: str, prev_hash: str, created_at: str) -> str:
@@ -329,6 +509,7 @@ def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
     prev = GENESIS_HASH
     pub = vp.carregar_chave(settings.chave_publica_hex)
     eventos: dict[str, dict[str, sqlite3.Row]] = {}
+    por_seq: dict[int, sqlite3.Row] = {}
     for ev in conn.execute("SELECT * FROM ledger ORDER BY seq"):
         total += 1
         if ev["seq"] != total:
@@ -342,6 +523,7 @@ def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
         if ev["assinatura"] is not None and not vp.assinatura_valida(pub, dict(ev)):
             return falha(ev["seq"], "Assinatura Ed25519 inválida: registro alterado ou chave diferente.")
         eventos.setdefault(ev["tx_id"], {})[ev["evento"]] = ev
+        por_seq[ev["seq"]] = ev
         prev = ev["hash"]
 
     # 2) A tabela `transacoes` é só uma projeção; ela precisa bater com o livro.
@@ -360,8 +542,91 @@ def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
         if decisao and tx["proof_hash"] != decisao["hash"]:
             return falha(decisao["seq"], f"O selo de {tx['tx_id']} diverge do registrado.")
 
+    # 3) Os desfechos de tópico também são projeção: cada um aponta para o seu evento.
+    sincronizados = {s for s, ev in por_seq.items() if ev["evento"] == "SINCRONIZACAO"}
+    for d in conn.execute("SELECT * FROM desfechos_topico ORDER BY ledger_seq"):
+        ev = por_seq.get(d["ledger_seq"])
+        if ev is None or ev["evento"] != "SINCRONIZACAO" or ev["tx_id"] != d["tx_id"]:
+            return falha(d["ledger_seq"], f"Desfecho do tópico {d['topic_id']} sem evento correspondente no livro.")
+        if json.loads(ev["dados"]) != desfecho_no_livro(d):
+            return falha(d["ledger_seq"], f"Desfecho do tópico {d['topic_id']} diverge do registrado.")
+        sincronizados.discard(d["ledger_seq"])
+    if sincronizados:
+        return falha(min(sincronizados), "Evento de sincronização sem desfecho correspondente.")
+
     return {"integro": True, "total_eventos": total, "head_hash": prev,
             "falha": None, "verificado_em": agora()}
+
+
+# ──────────────────── Sincronização entre janelas ────────────────────────
+#
+# Várias janelas (sessões de IA) podem tratar do mesmo assunto ao mesmo tempo. Para que
+# a janela B não contradiga o que a janela A já fechou, cada desfecho chancelado é
+# publicado num tópico, e a janela seguinte recebe essa linha do tempo como contexto.
+#
+# Só entra no tópico o que um operador já chancelou: a certidão é o proof_hash da
+# transação (o hash do evento CHANCELA), lido do banco, nunca informado pelo cliente.
+# O registro vira um evento SINCRONIZACAO no livro, assinado como qualquer outro.
+
+def desfecho_no_livro(d: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    """Dados do evento SINCRONIZACAO correspondentes a uma linha de `desfechos_topico`."""
+    return {"topic_id": d["topic_id"], "janela": d["janela"], "dados": json.loads(d["dados"]),
+            "hash_certidao": d["hash_certidao"], "operador_login": d["operador_login"]}
+
+
+def registrar_desfecho_janela(topic_id: str, janela: str, tx_id: str,
+                              dados: dict[str, Any], operador: Operador) -> dict[str, Any]:
+    dados_json = canonico(dados)
+    if len(dados_json) > MAX_DADOS_DESFECHO:
+        raise HTTPException(422, f"Os dados do desfecho passam de {MAX_DADOS_DESFECHO} caracteres.")
+    with escrita() as conn:
+        tx = conn.execute("SELECT tx_id, status, proof_hash FROM transacoes WHERE tx_id = ?",
+                          (tx_id,)).fetchone()
+        if tx is None:
+            raise HTTPException(404, "Transação não encontrada.")
+        if tx["status"] != Status.CHANCELADO.value:
+            raise HTTPException(409, "Só desfechos chancelados entram no tópico "
+                                     f"(status atual: {tx['status']}).")
+        if conn.execute("SELECT 1 FROM desfechos_topico WHERE topic_id = ? AND tx_id = ?",
+                        (topic_id, tx_id)).fetchone():
+            raise HTTPException(409, f"Esta transação já foi sincronizada no tópico {topic_id}.")
+        linha = {"topic_id": topic_id, "janela": janela, "tx_id": tx_id, "dados": dados_json,
+                 "hash_certidao": tx["proof_hash"], "operador_login": operador.login,
+                 "sincronizado_em": agora()}
+        evento = registrar_evento(conn, tx_id, "SINCRONIZACAO", desfecho_no_livro(linha),
+                                  linha["sincronizado_em"])
+        conn.execute(
+            "INSERT INTO desfechos_topico (ledger_seq, topic_id, janela, tx_id, dados, hash_certidao, "
+            "operador_login, sincronizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (evento["seq"], topic_id, janela, tx_id, dados_json, linha["hash_certidao"],
+             operador.login, linha["sincronizado_em"]))
+    return {**serializar_desfecho({**linha, "ledger_seq": evento["seq"]}), "ledger": evento}
+
+
+def serializar_desfecho(d: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {"ledger_seq": d["ledger_seq"], "janela": d["janela"], "transaction_id": d["tx_id"],
+            "dados": json.loads(d["dados"]), "hash_certidao": d["hash_certidao"],
+            "operador_login": d["operador_login"], "sincronizado_em": d["sincronizado_em"]}
+
+
+def historico_topico(conn: sqlite3.Connection, topic_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute("SELECT * FROM desfechos_topico WHERE topic_id = ? ORDER BY ledger_seq",
+                        (topic_id,)).fetchall()
+    return [serializar_desfecho(r) for r in rows]
+
+
+def preparar_contexto_proxima_janela(historico: list[dict[str, Any]]) -> str:
+    """Linha do tempo canônica, em texto, para injetar no prompt da próxima janela."""
+    if not historico:
+        return "Nenhum contexto prévio registrado para este tópico."
+    linhas = ["FATOS E DELIBERAÇÕES ANTERIORES CHANCELADOS:"]
+    for item in historico:
+        linhas.append(
+            f"- [{item['sincronizado_em']}] Origem: {item['janela']} | "
+            f"Certidão: {item['hash_certidao'][:12]}... | "
+            f"Parâmetros Fixados: {canonico(item['dados'])}"
+        )
+    return "\n".join(linhas) + "\n"
 
 
 # ───────────────────────────── Serialização ──────────────────────────────
@@ -440,7 +705,7 @@ def intercept(req: InterceptRequest) -> dict[str, Any]:
     }
 
 
-def _decidir(req: DecisionRequest, aprovar: bool) -> dict[str, Any]:
+def _decidir(req: DecisionRequest, operador: Operador, aprovar: bool) -> dict[str, Any]:
     with escrita() as conn:
         tx = conn.execute("SELECT * FROM transacoes WHERE tx_id = ?", (req.transaction_id,)).fetchone()
         if tx is None:
@@ -462,7 +727,8 @@ def _decidir(req: DecisionRequest, aprovar: bool) -> dict[str, Any]:
         decisao_id = novo_id("SEAL-CALICE" if aprovar else "REJ-CALICE")
         evento = registrar_evento(conn, tx["tx_id"], "CHANCELA" if aprovar else "REJEICAO", {
             "decisao_id": decisao_id,
-            "operador": req.operator_name,
+            "operador": operador.nome,
+            "operador_login": operador.login,
             "justificativa": req.notes,
             "violacoes_reconhecidas": sorted(codigos & set(req.acknowledged_violations)),
             "status_anterior": tx["status"],
@@ -471,7 +737,7 @@ def _decidir(req: DecisionRequest, aprovar: bool) -> dict[str, Any]:
         conn.execute(
             "UPDATE transacoes SET status = ?, decisao_id = ?, operador = ?, justificativa = ?, "
             "decided_at = ?, proof_hash = ? WHERE tx_id = ?",
-            (novo_status.value, decisao_id, req.operator_name, req.notes,
+            (novo_status.value, decisao_id, operador.nome, req.notes,
              decided_at, evento["hash"], tx["tx_id"]),
         )
 
@@ -479,7 +745,8 @@ def _decidir(req: DecisionRequest, aprovar: bool) -> dict[str, Any]:
         "transaction_id": req.transaction_id,
         "status": novo_status.value,
         "juizo_humano": {
-            "operator": req.operator_name,
+            "operator": operador.nome,
+            "operator_login": operador.login,
             "justification": req.notes,
             "acknowledged_violations": sorted(codigos & set(req.acknowledged_violations)),
             "signed_at": decided_at,
@@ -496,13 +763,50 @@ def _decidir(req: DecisionRequest, aprovar: bool) -> dict[str, Any]:
 
 
 @app.post("/api/v1/seal")
-def seal(req: DecisionRequest) -> dict[str, Any]:
-    return _decidir(req, aprovar=True)
+def seal(req: DecisionRequest, operador: Operador = Depends(operador_autenticado)) -> dict[str, Any]:
+    return _decidir(req, operador, aprovar=True)
 
 
 @app.post("/api/v1/reject")
-def reject(req: DecisionRequest) -> dict[str, Any]:
-    return _decidir(req, aprovar=False)
+def reject(req: DecisionRequest, operador: Operador = Depends(operador_autenticado)) -> dict[str, Any]:
+    return _decidir(req, operador, aprovar=False)
+
+
+TopicId = PathParam(pattern=IDENTIFICADOR_VALIDO, max_length=120)
+
+
+@app.post("/api/v1/topics/{topic_id}/outcomes", status_code=201)
+def publicar_desfecho(req: DesfechoRequest, topic_id: str = TopicId,
+                      operador: Operador = Depends(operador_autenticado)) -> dict[str, Any]:
+    return {"topic_id": topic_id,
+            **registrar_desfecho_janela(topic_id, req.janela, req.transaction_id, req.dados, operador)}
+
+
+@app.get("/api/v1/topics/{topic_id}/context")
+def contexto_topico(topic_id: str = TopicId) -> dict[str, Any]:
+    with leitura() as conn:
+        historico = historico_topico(conn, topic_id)
+    return {"topic_id": topic_id, "itens": historico,
+            "contexto": preparar_contexto_proxima_janela(historico)}
+
+
+@app.post("/api/v1/auth/login")
+def login(req: LoginRequest) -> dict[str, Any]:
+    sessao = abrir_sessao(req.login, req.password)
+    if sessao is None:
+        raise HTTPException(401, "Login ou senha inválidos.", headers=NAO_AUTENTICADO)
+    token, expira_em, operador = sessao
+    return {"token": token, "token_type": "bearer", "expires_at": expira_em, "operador": asdict(operador)}
+
+
+@app.post("/api/v1/auth/logout", status_code=204)
+def logout(token: str = Depends(token_da_requisicao)) -> None:
+    fechar_sessao(token)
+
+
+@app.get("/api/v1/auth/me")
+def quem_sou(operador: Operador = Depends(operador_autenticado)) -> dict[str, Any]:
+    return asdict(operador)
 
 
 @app.get("/api/v1/transactions")
@@ -587,3 +891,57 @@ def health() -> dict[str, Any]:
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+# ─────────────────────────── Linha de comando ────────────────────────────
+
+def cli(argv: list[str] | None = None) -> int:
+    """Gestão de operadores:  python main.py operador {criar,senha,desativar,reativar,listar}"""
+    import argparse
+    import getpass
+
+    parser = argparse.ArgumentParser(prog="python main.py", description="Cálice Poderoso: gestão de operadores")
+    sub = parser.add_subparsers(dest="grupo", required=True)
+    acoes = sub.add_parser("operador").add_subparsers(dest="acao", required=True)
+    criar = acoes.add_parser("criar", help="cria um operador (pede a senha no terminal)")
+    criar.add_argument("login")
+    criar.add_argument("nome", help="nome completo, como aparecerá nos selos")
+    for nome, ajuda in (("senha", "troca a senha e encerra as sessões abertas"),
+                        ("desativar", "bloqueia o operador e encerra as sessões abertas"),
+                        ("reativar", "desbloqueia o operador")):
+        acoes.add_parser(nome, help=ajuda).add_argument("login")
+    acoes.add_parser("listar", help="lista os operadores")
+    args = parser.parse_args(argv)
+
+    global settings
+    settings = load_settings()
+    init_db()
+
+    def pedir_senha() -> str:
+        senha = getpass.getpass("Senha (mín. 12 caracteres): ")
+        if senha != getpass.getpass("Repita a senha: "):
+            raise ValueError("As senhas não conferem.")
+        return senha
+
+    try:
+        if args.acao == "criar":
+            op = criar_operador(args.login, args.nome, pedir_senha())
+            print(f"Operador criado: {op.login} ({op.nome})")
+        elif args.acao == "senha":
+            definir_senha(args.login, pedir_senha())
+            print(f"Senha de {args.login} alterada.")
+        elif args.acao in ("desativar", "reativar"):
+            definir_ativo(args.login, args.acao == "reativar")
+            print(f"Operador {args.login} {'reativado' if args.acao == 'reativar' else 'desativado'}.")
+        else:
+            with leitura() as conn:
+                for r in conn.execute("SELECT login, nome, ativo FROM operadores ORDER BY login"):
+                    print(f"{r['login']:<24} {r['nome']:<40} {'ativo' if r['ativo'] else 'desativado'}")
+    except ValueError as e:
+        print(f"Erro: {e}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())

@@ -16,17 +16,37 @@ RISCO = {"document_id": "DOC-1", "content": "Liberação de pagamento ao fornece
 CONFORME = {**RISCO, "document_id": "DOC-2", "liability_clause": True, "confidence_score": 0.95}
 
 
+SENHA = "senha-de-teste-longa"
+
+
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def anonimo(tmp_path, monkeypatch):
     monkeypatch.setenv("CALICE_DB_PATH", str(tmp_path / "teste.db"))
     monkeypatch.setenv("CALICE_SIGNING_KEY", "chave-de-teste")
     with TestClient(main.app) as c:
+        main.criar_operador("marina", "Operadora Teste", SENHA)
         yield c
 
 
+@pytest.fixture
+def client(anonimo):
+    """Cliente já autenticado como a operadora `marina`."""
+    anonimo.headers["Authorization"] = f"Bearer {entrar(anonimo)}"
+    return anonimo
+
+
+def entrar(client, login="marina", senha=SENHA) -> str:
+    r = client.post("/api/v1/auth/login", json={"login": login, "password": senha})
+    assert r.status_code == 200, r.text
+    return r.json()["token"]
+
+
+def bearer(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
 def decisao(tx_id: str, **extra) -> dict:
-    return {"transaction_id": tx_id, "operator_name": "Operadora Teste",
-            "notes": "Revisado contra o contrato original.", **extra}
+    return {"transaction_id": tx_id, "notes": "Revisado contra o contrato original.", **extra}
 
 
 def interceptar(client, payload=CONFORME) -> dict:
@@ -280,3 +300,211 @@ def test_verificador_publico_por_linha_de_comando(client, tmp_path, capsys):
     pub = client.get("/api/v1/ledger/public-key").json()["hex"]
     assert verificar_publico.main([str(arquivo), "--chave", pub]) == 0
     assert verificar_publico.main([str(arquivo), "--chave", "ab" * 32]) == 1
+
+
+# ── Autenticação do operador ──────────────────────────────────────────────
+
+@pytest.mark.parametrize("rota", ["/api/v1/seal", "/api/v1/reject"])
+def test_decisao_sem_login_e_recusada(anonimo, rota):
+    tx = interceptar(anonimo)
+    r = anonimo.post(rota, json=decisao(tx["transaction_id"]))
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"] == "Bearer"
+    assert anonimo.get(f"/api/v1/transactions/{tx['transaction_id']}").json()["status"] == "PRONTO_PARA_CHANCELA"
+
+
+def test_token_inventado_e_recusado(anonimo):
+    tx = interceptar(anonimo)
+    r = anonimo.post("/api/v1/seal", json=decisao(tx["transaction_id"]), headers=bearer("inventado"))
+    assert r.status_code == 401
+
+
+@pytest.mark.parametrize("login,senha", [("marina", "senha-errada-123"), ("ninguem", SENHA)])
+def test_login_invalido_nao_revela_o_motivo(anonimo, login, senha):
+    r = anonimo.post("/api/v1/auth/login", json={"login": login, "password": senha})
+    assert r.status_code == 401
+    assert r.json()["detail"] == "Login ou senha inválidos."
+
+
+def test_login_devolve_o_operador(anonimo):
+    r = anonimo.post("/api/v1/auth/login", json={"login": "  MARINA ", "password": SENHA})
+    assert r.status_code == 200
+    assert r.json()["operador"] == {"login": "marina", "nome": "Operadora Teste"}
+    assert anonimo.get("/api/v1/auth/me", headers=bearer(r.json()["token"])).json()["login"] == "marina"
+
+
+def test_operador_vem_da_sessao_e_nao_do_corpo(client):
+    tx = interceptar(client)
+    r = client.post("/api/v1/seal", json=decisao(tx["transaction_id"], operator_name="Diretor Presidente"))
+    assert r.status_code == 200
+    assert r.json()["juizo_humano"]["operator"] == "Operadora Teste"
+    assert r.json()["juizo_humano"]["operator_login"] == "marina"
+    assert client.get(f"/api/v1/transactions/{tx['transaction_id']}").json()["decisao"]["operador"] == "Operadora Teste"
+
+
+def test_livro_registra_o_login_do_operador(client):
+    tx = interceptar(client)
+    client.post("/api/v1/reject", json=decisao(tx["transaction_id"]))
+    with sqlite3.connect(main.settings.db_path) as db:
+        dados = db.execute("SELECT dados FROM ledger WHERE evento = 'REJEICAO'").fetchone()[0]
+    assert '"operador_login":"marina"' in dados
+    assert client.get("/api/v1/ledger/verify").json()["integro"] is True
+
+
+def test_logout_invalida_o_token(anonimo):
+    token = entrar(anonimo)
+    assert anonimo.post("/api/v1/auth/logout", headers=bearer(token)).status_code == 204
+    assert anonimo.get("/api/v1/auth/me", headers=bearer(token)).status_code == 401
+
+
+def test_sessao_expirada_e_recusada(anonimo):
+    token = entrar(anonimo)
+    with sqlite3.connect(main.settings.db_path) as db:
+        db.execute("UPDATE sessoes SET expira_em = '2000-01-01T00:00:00.000+00:00'")
+    assert anonimo.get("/api/v1/auth/me", headers=bearer(token)).status_code == 401
+
+
+def test_operador_desativado_perde_acesso(anonimo):
+    token = entrar(anonimo)
+    main.definir_ativo("marina", False)
+    assert anonimo.get("/api/v1/auth/me", headers=bearer(token)).status_code == 401
+    assert anonimo.post("/api/v1/auth/login", json={"login": "marina", "password": SENHA}).status_code == 401
+    main.definir_ativo("marina", True)
+    entrar(anonimo)
+
+
+def test_troca_de_senha_encerra_sessoes(anonimo):
+    token = entrar(anonimo)
+    main.definir_senha("marina", "outra-senha-bem-longa")
+    assert anonimo.get("/api/v1/auth/me", headers=bearer(token)).status_code == 401
+    entrar(anonimo, senha="outra-senha-bem-longa")
+
+
+def test_banco_nao_guarda_senha_nem_token_em_claro(anonimo):
+    token = entrar(anonimo)
+    with sqlite3.connect(main.settings.db_path) as db:
+        despejo = "\n".join(db.iterdump())
+    assert SENHA not in despejo and token not in despejo
+
+
+@pytest.mark.parametrize("login,nome,senha", [
+    ("marina", "Outra Marina", SENHA),     # login repetido
+    ("x", "Nome Válido", SENHA),           # login curto
+    ("joao", "João Silva", "curta"),       # senha curta
+])
+def test_criacao_de_operador_valida_dados(anonimo, login, nome, senha):
+    with pytest.raises(ValueError):
+        main.criar_operador(login, nome, senha)
+
+
+def test_cli_cria_operador(anonimo, monkeypatch, capsys):
+    monkeypatch.setattr("getpass.getpass", lambda _: "senha-do-joao-123")
+    assert main.cli(["operador", "criar", "joao", "João Silva"]) == 0
+    assert "joao" in capsys.readouterr().out
+    entrar(anonimo, "joao", "senha-do-joao-123")
+
+
+# ── Sincronização entre janelas ───────────────────────────────────────────
+
+TOPICO = "contrato-fornecedor-42"
+
+
+def chancelada(client) -> dict:
+    tx = interceptar(client)
+    r = client.post("/api/v1/seal", json=decisao(tx["transaction_id"]))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def sincronizar(client, tx_id: str, janela="janela-A", dados=None, topico=TOPICO):
+    return client.post(f"/api/v1/topics/{topico}/outcomes", json={
+        "transaction_id": tx_id, "janela": janela, "dados": dados or {"prazo_dias": 30}})
+
+
+def test_topico_sem_historico_devolve_aviso(anonimo):
+    r = anonimo.get(f"/api/v1/topics/{TOPICO}/context").json()
+    assert r["itens"] == []
+    assert r["contexto"] == "Nenhum contexto prévio registrado para este tópico."
+
+
+def test_janela_b_recebe_o_que_a_janela_a_chancelou(client):
+    a = chancelada(client)
+    b = chancelada(client)
+    ra = sincronizar(client, a["transaction_id"], "janela-A", {"prazo_dias": 30, "multa": "2%"})
+    assert ra.status_code == 201, ra.text
+    assert sincronizar(client, b["transaction_id"], "janela-C", {"índice": "IPCA"}).status_code == 201
+
+    r = client.get(f"/api/v1/topics/{TOPICO}/context").json()
+    assert [i["janela"] for i in r["itens"]] == ["janela-A", "janela-C"]
+    # A certidão é o selo real da chancela, não um valor informado pelo cliente.
+    assert r["itens"][0]["hash_certidao"] == a["selo_calice"]["proof_hash"]
+    linhas = r["contexto"].splitlines()
+    assert linhas[0] == "FATOS E DELIBERAÇÕES ANTERIORES CHANCELADOS:"
+    assert "Origem: janela-A" in linhas[1] and a["selo_calice"]["proof_hash"][:12] in linhas[1]
+    assert '{"multa":"2%","prazo_dias":30}' in linhas[1]
+    assert '"índice":"IPCA"' in linhas[2]  # acentos preservados
+    assert client.get("/api/v1/ledger/verify").json()["integro"] is True
+
+
+def test_topicos_sao_isolados(client):
+    sincronizar(client, chancelada(client)["transaction_id"])
+    assert client.get("/api/v1/topics/outro-topico/context").json()["itens"] == []
+
+
+@pytest.mark.parametrize("aprovar", [None, False])
+def test_so_desfecho_chancelado_entra_no_topico(client, aprovar):
+    tx = interceptar(client)
+    if aprovar is False:
+        client.post("/api/v1/reject", json=decisao(tx["transaction_id"]))
+    assert sincronizar(client, tx["transaction_id"]).status_code == 409
+    assert client.get(f"/api/v1/topics/{TOPICO}/context").json()["itens"] == []
+
+
+def test_transacao_inexistente_retorna_404(client):
+    assert sincronizar(client, "TX-NAO-EXISTE").status_code == 404
+
+
+def test_mesma_transacao_nao_entra_duas_vezes_no_topico(client):
+    tx_id = chancelada(client)["transaction_id"]
+    assert sincronizar(client, tx_id).status_code == 201
+    assert sincronizar(client, tx_id, "janela-B").status_code == 409
+    assert sincronizar(client, tx_id, topico="outro-topico").status_code == 201
+
+
+def test_sincronizar_exige_login(anonimo):
+    assert sincronizar(anonimo, "TX-QUALQUER").status_code == 401
+
+
+@pytest.mark.parametrize("janela", ["janela A", "x\n- [2026] Origem: forjada", ""])
+def test_janela_com_quebra_de_linha_e_recusada(client, janela):
+    assert sincronizar(client, chancelada(client)["transaction_id"], janela).status_code == 422
+
+
+def test_dados_grandes_demais_sao_recusados(client):
+    tx_id = chancelada(client)["transaction_id"]
+    assert sincronizar(client, tx_id, dados={"x": "a" * 20_000}).status_code == 422
+
+
+def test_sincronizacao_entra_no_livro_assinada(client):
+    tx_id = chancelada(client)["transaction_id"]
+    r = sincronizar(client, tx_id).json()
+    assert r["ledger"]["evento"] == "SINCRONIZACAO"
+    export = client.get("/api/v1/ledger/export").json()
+    ultimo = export["registros"][-1]
+    assert ultimo["evento"] == "SINCRONIZACAO" and ultimo["tx_id"] == tx_id
+    assert verificar_publico.verificar_documento(export, export["chave_publica"]["hex"])["integro"] is True
+
+
+def test_adulteracao_do_desfecho_e_detectada(client):
+    sincronizar(client, chancelada(client)["transaction_id"], dados={"prazo_dias": 30})
+    with sqlite3.connect(main.settings.db_path) as db:
+        db.execute("UPDATE desfechos_topico SET dados = '{\"prazo_dias\":90}'")
+    v = client.get("/api/v1/ledger/verify").json()
+    assert v["integro"] is False and "diverge" in v["falha"]["motivo"]
+
+
+def test_desfecho_apagado_e_detectado(client):
+    sincronizar(client, chancelada(client)["transaction_id"])
+    with sqlite3.connect(main.settings.db_path) as db:
+        db.execute("DELETE FROM desfechos_topico")
+    assert client.get("/api/v1/ledger/verify").json()["integro"] is False

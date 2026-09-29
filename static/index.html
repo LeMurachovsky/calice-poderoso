@@ -225,12 +225,18 @@
   .decisao { display: grid; gap: 14px; max-width: 660px; }
   .campo { display: grid; gap: 6px; }
   .rotulo { color: var(--grafite); font-size: 13px; font-weight: 500; }
-  input[type="text"], textarea {
+  input[type="text"], input[type="password"], textarea {
     width: 100%; padding: 10px 12px; border: 1px solid var(--regua-forte); border-radius: 6px;
     background: var(--folha); color: var(--tinta); font: 15px/1.5 var(--sans);
   }
-  input[type="text"]:focus-visible, textarea:focus-visible { outline-offset: 0; border-color: var(--carimbo); }
+  input[type="text"]:focus-visible, input[type="password"]:focus-visible, textarea:focus-visible { outline-offset: 0; border-color: var(--carimbo); }
   textarea { min-height: 96px; resize: vertical; }
+  .entrada { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; }
+  @media (max-width: 560px) { .entrada { grid-template-columns: 1fr; } }
+  .sessao { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 10px 12px; border: 1px solid var(--regua); border-radius: 6px; }
+  .sessao b { font-weight: 600; }
+  .sessao code { color: var(--grafite); font-size: 13px; }
   .contador { justify-self: end; color: var(--grafite); font-size: 12.5px; font-variant-numeric: tabular-nums; }
   .acoes { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
   .pendencias { flex: 1 1 220px; margin: 0; color: var(--grafite); font-size: 13.5px; }
@@ -414,11 +420,14 @@
   const NOMES = { LACUNA_JURIDICA: "Lacuna jurídica", CONFIANCA_BAIXA: "Confiança insuficiente" };
   const SEVERIDADE = { CRITICA: "crítica", ALTA: "alta", MEDIA: "média" };
   const EVENTOS = { INTERCEPTACAO: "Interceptação", CHANCELA: "Chancela", REJEICAO: "Rejeição" };
-  const MIN_OPERADOR = 3, MIN_JUSTIFICATIVA = 15;
+  const MIN_JUSTIFICATIVA = 15;
+  // A sessão fica só nesta aba (sessionStorage): fechar a aba encerra o acesso no navegador.
+  const lerSessao = () => { try { return JSON.parse(sessionStorage.getItem("calice.sessao")); } catch { return null; } };
+  const gravarSessao = (v) => { try { v ? sessionStorage.setItem("calice.sessao", JSON.stringify(v)) : sessionStorage.removeItem("calice.sessao"); } catch {} };
 
   const estado = {
     itens: [], resumo: {}, filtro: "pendentes", sel: null, det: null,
-    ciencia: new Set(), justificativa: "", operador: lerLocal("calice.operador") || "",
+    ciencia: new Set(), justificativa: "", sessao: lerSessao(),
     recem: null, ocupado: false, padrao: "CUSTODIA_PROBATORIA_CPC",
   };
 
@@ -459,9 +468,12 @@
 
   // ── Comunicação com a API ──────────────────────────
   async function api(caminho, opcoes = {}) {
-    const resp = await fetch(caminho, { headers: { "Content-Type": "application/json" }, ...opcoes });
+    const headers = { "Content-Type": "application/json" };
+    if (estado.sessao) headers.Authorization = `Bearer ${estado.sessao.token}`;
+    const resp = await fetch(caminho, { ...opcoes, headers });
     let corpo = null;
     try { corpo = await resp.json(); } catch {}
+    if (resp.status === 401 && estado.sessao) { estado.sessao = null; gravarSessao(null); }
     if (!resp.ok) throw new Error(mensagemDeErro(corpo, resp.status));
     return corpo;
   }
@@ -678,9 +690,19 @@
     const dica = t.violations.length
       ? "Explique por que a proposta pode seguir apesar das violações, ou por que deve ser barrada."
       : "Registre o que você conferiu antes de decidir.";
+    const s = estado.sessao;
+    const operador = s
+      ? `<div class="campo"><span class="rotulo">Operador responsável</span>
+          <div class="sessao"><span><b>${esc(s.operador.nome)}</b> <code>${esc(s.operador.login)}</code></span>
+            <button type="button" class="btn" id="btn-sair">Sair</button></div></div>`
+      : `<div class="campo"><span class="rotulo">Operador responsável: entre com sua conta para decidir</span>
+          <div class="entrada">
+            <input id="login" type="text" autocomplete="username" maxlength="64" placeholder="Login" aria-label="Login">
+            <input id="senha" type="password" autocomplete="current-password" maxlength="256" placeholder="Senha" aria-label="Senha">
+            <button type="button" class="btn" id="btn-entrar">Entrar</button>
+          </div></div>`;
     return `<form id="form-decisao" class="decisao" novalidate>
-      <label class="campo"><span class="rotulo">Operador responsável</span>
-        <input id="operador" type="text" autocomplete="name" maxlength="120" placeholder="Nome completo" value="${esc(estado.operador)}"></label>
+      ${operador}
       <label class="campo"><span class="rotulo">Justificativa</span>
         <textarea id="justificativa" rows="4" maxlength="2000" placeholder="${esc(dica)}">${esc(estado.justificativa)}</textarea>
         <span class="contador" id="contador"></span></label>
@@ -697,7 +719,6 @@
   function ligarFormulario(t) {
     const form = $("#form-decisao");
     form.addEventListener("input", (ev) => {
-      if (ev.target.id === "operador") { estado.operador = ev.target.value; gravarLocal("calice.operador", ev.target.value.trim()); }
       if (ev.target.id === "justificativa") estado.justificativa = ev.target.value;
       atualizarFormulario(t);
     });
@@ -705,20 +726,23 @@
       cb.checked ? estado.ciencia.add(cb.dataset.codigo) : estado.ciencia.delete(cb.dataset.codigo);
       atualizarFormulario(t);
     }));
-    form.addEventListener("submit", (ev) => { ev.preventDefault(); decidir(t, true); });
+    form.addEventListener("submit", (ev) => { ev.preventDefault(); estado.sessao ? decidir(t, true) : entrar(t); });
+    $("#btn-entrar")?.addEventListener("click", () => entrar(t));
+    $("#senha")?.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); entrar(t); } });
+    $("#btn-sair")?.addEventListener("click", () => sair());
     $("#btn-rejeitar").addEventListener("click", () => decidir(t, false));
     atualizarFormulario(t);
   }
 
   function atualizarFormulario(t) {
     if (!$("#form-decisao")) return;
-    const op = estado.operador.trim().length;
+    const op = Boolean(estado.sessao);
     const js = estado.justificativa.trim().length;
     const semCiencia = t.violations.filter((v) => !estado.ciencia.has(v.codigo)).length;
-    const baseOk = op >= MIN_OPERADOR && js >= MIN_JUSTIFICATIVA;
+    const baseOk = op && js >= MIN_JUSTIFICATIVA;
 
     const falta = [];
-    if (op < MIN_OPERADOR) falta.push("nome do operador");
+    if (!op) falta.push("entrar como operador");
     if (js < MIN_JUSTIFICATIVA) falta.push("justificativa");
     if (semCiencia) falta.push(`ciência de ${plural(semCiencia, "violação", "violações")}`);
 
@@ -742,7 +766,6 @@
         method: "POST",
         body: JSON.stringify({
           transaction_id: t.transaction_id,
-          operator_name: estado.operador.trim(),
           notes: estado.justificativa.trim(),
           acknowledged_violations: [...estado.ciencia],
         }),
@@ -759,9 +782,33 @@
       estado.ocupado = false;
       botao.textContent = rotulo;
       avisar(`${aprovar ? "Não foi possível emitir o selo" : "Não foi possível rejeitar"}: ${e.message}`, "erro");
-      if (/já foi decidida/.test(e.message)) { await abrir(t.transaction_id); await carregarFila(); }
+      if (!estado.sessao) renderDetalhe();
+      else if (/já foi decidida/.test(e.message)) { await abrir(t.transaction_id); await carregarFila(); }
       else atualizarFormulario(t);
     }
+  }
+
+  async function entrar(t) {
+    const login = $("#login").value.trim(), senha = $("#senha").value;
+    if (!login || !senha) { avisar("Informe login e senha.", "erro"); return; }
+    $("#btn-entrar").disabled = true;
+    try {
+      const r = await api("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ login, password: senha }) });
+      estado.sessao = { token: r.token, expires_at: r.expires_at, operador: r.operador };
+      gravarSessao(estado.sessao);
+      avisar(`Sessão iniciada como ${r.operador.nome}.`);
+      renderDetalhe();
+    } catch (e) {
+      avisar(`Não foi possível entrar: ${e.message}`, "erro");
+      $("#btn-entrar").disabled = false;
+    }
+  }
+
+  async function sair() {
+    try { await api("/api/v1/auth/logout", { method: "POST" }); } catch {}
+    estado.sessao = null;
+    gravarSessao(null);
+    renderDetalhe();
   }
 
   function registroHTML(t) {
