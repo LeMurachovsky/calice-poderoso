@@ -11,6 +11,9 @@ Camada de governança human-in-the-loop para decisões de IA:
      HMAC-SHA256 (elo da cadeia) e Ed25519 (assinatura pública)
   5. Qualquer auditor confere o livro ..... GET  /api/v1/ledger/verify
   6. Terceiros conferem sem segredo ....... GET  /api/v1/ledger/export + verificar_publico.py
+  7. Janelas concorrentes compartilham o que já foi chancelado num tópico:
+       registra o desfecho ................ POST /api/v1/topics/{topic_id}/outcomes
+       monta o contexto da próxima janela . GET  /api/v1/topics/{topic_id}/context
 
 Janelas temporais: cada proposta traz um nível de risco (LOW, MEDIUM, HIGH) e, opcionalmente,
 o login do operador de plantão. Durante a janela do nível, só o plantonista decide; esgotado o
@@ -55,6 +58,7 @@ from typing import Any, Literal, Optional
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Path as PathParam
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
@@ -144,6 +148,11 @@ FINAIS = {Status.CHANCELADO.value, Status.REJEITADO.value}
 
 # ─────────────────────────────── Contratos ───────────────────────────────
 
+# Tópicos e janelas entram no texto do contexto: sem espaços nem quebras de linha,
+# para que um identificador não consiga forjar linhas de "fatos chancelados".
+IDENTIFICADOR_VALIDO = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$"
+MAX_DADOS_DESFECHO = 10_000
+
 class InterceptRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -163,6 +172,16 @@ class LoginRequest(BaseModel):
 
     login: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
+
+
+class DesfechoRequest(BaseModel):
+    """Desfecho de uma janela, amarrado a uma transação já chancelada."""
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    transaction_id: str = Field(min_length=1)
+    janela: str = Field(min_length=1, max_length=120, pattern=IDENTIFICADOR_VALIDO,
+                        description="Identificador da janela (sessão/conversa) de origem.")
+    dados: dict[str, Any] = Field(description="Parâmetros fixados pela janela.")
 
 
 class DecisionRequest(BaseModel):
@@ -273,6 +292,20 @@ CREATE TABLE IF NOT EXISTS ledger (
     assinatura TEXT  -- Ed25519 (hex); NULL em registros anteriores à assinatura pública
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_tx ON ledger(tx_id);
+
+-- Projeção dos eventos SINCRONIZACAO do livro, indexada por tópico (como `transacoes`).
+CREATE TABLE IF NOT EXISTS desfechos_topico (
+    ledger_seq      INTEGER PRIMARY KEY REFERENCES ledger(seq),
+    topic_id        TEXT NOT NULL,
+    janela          TEXT NOT NULL,
+    tx_id           TEXT NOT NULL REFERENCES transacoes(tx_id),
+    dados           TEXT NOT NULL,
+    hash_certidao   TEXT NOT NULL,
+    operador_login  TEXT NOT NULL,
+    sincronizado_em TEXT NOT NULL,
+    UNIQUE (topic_id, tx_id)
+);
+CREATE INDEX IF NOT EXISTS idx_desfechos_topico ON desfechos_topico(topic_id, ledger_seq);
 
 CREATE TABLE IF NOT EXISTS operadores (
     login      TEXT PRIMARY KEY,
@@ -514,6 +547,7 @@ def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
     prev = GENESIS_HASH
     pub = vp.carregar_chave(settings.chave_publica_hex)
     eventos: dict[str, dict[str, sqlite3.Row]] = {}
+    por_seq: dict[int, sqlite3.Row] = {}
     for ev in conn.execute("SELECT * FROM ledger ORDER BY seq"):
         total += 1
         if ev["seq"] != total:
@@ -527,6 +561,7 @@ def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
         if ev["assinatura"] is not None and not vp.assinatura_valida(pub, dict(ev)):
             return falha(ev["seq"], "Assinatura Ed25519 inválida: registro alterado ou chave diferente.")
         eventos.setdefault(ev["tx_id"], {})[ev["evento"]] = ev
+        por_seq[ev["seq"]] = ev
         prev = ev["hash"]
 
     # 2) A tabela `transacoes` é só uma projeção; ela precisa bater com o livro.
@@ -544,6 +579,18 @@ def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
             return falha(origem["seq"], f"O status de {tx['tx_id']} diverge do registrado.")
         if decisao and tx["proof_hash"] != decisao["hash"]:
             return falha(decisao["seq"], f"O selo de {tx['tx_id']} diverge do registrado.")
+
+    # 3) Os desfechos de tópico também são projeção: cada um aponta para o seu evento.
+    sincronizados = {s for s, ev in por_seq.items() if ev["evento"] == "SINCRONIZACAO"}
+    for d in conn.execute("SELECT * FROM desfechos_topico ORDER BY ledger_seq"):
+        ev = por_seq.get(d["ledger_seq"])
+        if ev is None or ev["evento"] != "SINCRONIZACAO" or ev["tx_id"] != d["tx_id"]:
+            return falha(d["ledger_seq"], f"Desfecho do tópico {d['topic_id']} sem evento correspondente no livro.")
+        if json.loads(ev["dados"]) != desfecho_no_livro(d):
+            return falha(d["ledger_seq"], f"Desfecho do tópico {d['topic_id']} diverge do registrado.")
+        sincronizados.discard(d["ledger_seq"])
+    if sincronizados:
+        return falha(min(sincronizados), "Evento de sincronização sem desfecho correspondente.")
 
     return {"integro": True, "total_eventos": total, "head_hash": prev,
             "falha": None, "verificado_em": agora()}
@@ -599,6 +646,77 @@ async def varredura_continua() -> None:
                 log.warning("%d janela(s) de plantão esgotada(s) sem decisão.", n)
         except Exception:  # a varredura não pode morrer por um erro pontual
             log.exception("Falha na varredura de prazos.")
+
+
+# ──────────────────── Sincronização entre janelas ────────────────────────
+#
+# Várias janelas (sessões de IA) podem tratar do mesmo assunto ao mesmo tempo. Para que
+# a janela B não contradiga o que a janela A já fechou, cada desfecho chancelado é
+# publicado num tópico, e a janela seguinte recebe essa linha do tempo como contexto.
+#
+# Só entra no tópico o que um operador já chancelou: a certidão é o proof_hash da
+# transação (o hash do evento CHANCELA), lido do banco, nunca informado pelo cliente.
+# O registro vira um evento SINCRONIZACAO no livro, assinado como qualquer outro.
+
+def desfecho_no_livro(d: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    """Dados do evento SINCRONIZACAO correspondentes a uma linha de `desfechos_topico`."""
+    return {"topic_id": d["topic_id"], "janela": d["janela"], "dados": json.loads(d["dados"]),
+            "hash_certidao": d["hash_certidao"], "operador_login": d["operador_login"]}
+
+
+def registrar_desfecho_janela(topic_id: str, janela: str, tx_id: str,
+                              dados: dict[str, Any], operador: Operador) -> dict[str, Any]:
+    dados_json = canonico(dados)
+    if len(dados_json) > MAX_DADOS_DESFECHO:
+        raise HTTPException(422, f"Os dados do desfecho passam de {MAX_DADOS_DESFECHO} caracteres.")
+    with escrita() as conn:
+        tx = conn.execute("SELECT tx_id, status, proof_hash FROM transacoes WHERE tx_id = ?",
+                          (tx_id,)).fetchone()
+        if tx is None:
+            raise HTTPException(404, "Transação não encontrada.")
+        if tx["status"] != Status.CHANCELADO.value:
+            raise HTTPException(409, "Só desfechos chancelados entram no tópico "
+                                     f"(status atual: {tx['status']}).")
+        if conn.execute("SELECT 1 FROM desfechos_topico WHERE topic_id = ? AND tx_id = ?",
+                        (topic_id, tx_id)).fetchone():
+            raise HTTPException(409, f"Esta transação já foi sincronizada no tópico {topic_id}.")
+        linha = {"topic_id": topic_id, "janela": janela, "tx_id": tx_id, "dados": dados_json,
+                 "hash_certidao": tx["proof_hash"], "operador_login": operador.login,
+                 "sincronizado_em": agora()}
+        evento = registrar_evento(conn, tx_id, "SINCRONIZACAO", desfecho_no_livro(linha),
+                                  linha["sincronizado_em"])
+        conn.execute(
+            "INSERT INTO desfechos_topico (ledger_seq, topic_id, janela, tx_id, dados, hash_certidao, "
+            "operador_login, sincronizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (evento["seq"], topic_id, janela, tx_id, dados_json, linha["hash_certidao"],
+             operador.login, linha["sincronizado_em"]))
+    return {**serializar_desfecho({**linha, "ledger_seq": evento["seq"]}), "ledger": evento}
+
+
+def serializar_desfecho(d: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {"ledger_seq": d["ledger_seq"], "janela": d["janela"], "transaction_id": d["tx_id"],
+            "dados": json.loads(d["dados"]), "hash_certidao": d["hash_certidao"],
+            "operador_login": d["operador_login"], "sincronizado_em": d["sincronizado_em"]}
+
+
+def historico_topico(conn: sqlite3.Connection, topic_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute("SELECT * FROM desfechos_topico WHERE topic_id = ? ORDER BY ledger_seq",
+                        (topic_id,)).fetchall()
+    return [serializar_desfecho(r) for r in rows]
+
+
+def preparar_contexto_proxima_janela(historico: list[dict[str, Any]]) -> str:
+    """Linha do tempo canônica, em texto, para injetar no prompt da próxima janela."""
+    if not historico:
+        return "Nenhum contexto prévio registrado para este tópico."
+    linhas = ["FATOS E DELIBERAÇÕES ANTERIORES CHANCELADOS:"]
+    for item in historico:
+        linhas.append(
+            f"- [{item['sincronizado_em']}] Origem: {item['janela']} | "
+            f"Certidão: {item['hash_certidao'][:12]}... | "
+            f"Parâmetros Fixados: {canonico(item['dados'])}"
+        )
+    return "\n".join(linhas) + "\n"
 
 
 # ───────────────────────────── Serialização ──────────────────────────────
@@ -775,6 +893,24 @@ def seal(req: DecisionRequest, operador: Operador = Depends(operador_autenticado
 @app.post("/api/v1/reject")
 def reject(req: DecisionRequest, operador: Operador = Depends(operador_autenticado)) -> dict[str, Any]:
     return _decidir(req, operador, aprovar=False)
+
+
+TopicId = PathParam(pattern=IDENTIFICADOR_VALIDO, max_length=120)
+
+
+@app.post("/api/v1/topics/{topic_id}/outcomes", status_code=201)
+def publicar_desfecho(req: DesfechoRequest, topic_id: str = TopicId,
+                      operador: Operador = Depends(operador_autenticado)) -> dict[str, Any]:
+    return {"topic_id": topic_id,
+            **registrar_desfecho_janela(topic_id, req.janela, req.transaction_id, req.dados, operador)}
+
+
+@app.get("/api/v1/topics/{topic_id}/context")
+def contexto_topico(topic_id: str = TopicId) -> dict[str, Any]:
+    with leitura() as conn:
+        historico = historico_topico(conn, topic_id)
+    return {"topic_id": topic_id, "itens": historico,
+            "contexto": preparar_contexto_proxima_janela(historico)}
 
 
 @app.post("/api/v1/auth/login")
