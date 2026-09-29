@@ -2,7 +2,7 @@
 
 business with Leandro Murachovsky
 
-Camada de governança *human-in-the-loop* para decisões de IA. Toda proposta da IA é interceptada, avaliada por regras e só segue com **juízo humano registrado**: operador identificado, justificativa escrita e ciência declarada de cada violação. Cada evento vai para um livro de registros encadeado e assinado (HMAC-SHA256), verificável a qualquer momento.
+Camada de governança *human-in-the-loop* para decisões de IA. Toda proposta da IA é interceptada, avaliada por regras e só segue com **juízo humano registrado**: operador identificado, justificativa escrita e ciência declarada de cada violação. Cada evento vai para um livro de registros encadeado e assinado duas vezes: HMAC-SHA256 (elo da cadeia) e Ed25519 (assinatura pública), que qualquer terceiro confere só com a chave pública.
 
 ## Rodando
 
@@ -19,10 +19,11 @@ Abra http://127.0.0.1:8000 (interface) ou http://127.0.0.1:8000/docs (Swagger).
 | Variável | Padrão | Função |
 |---|---|---|
 | `CALICE_SIGNING_KEY` | chave de desenvolvimento (com aviso no log e na interface) | Chave secreta das assinaturas do livro |
+| `CALICE_ED25519_SEED` | derivada de `CALICE_SIGNING_KEY` | Semente Ed25519 (64 caracteres hex) da assinatura pública |
 | `CALICE_DB_PATH` | `./calice.db` | Caminho do SQLite |
 | `CALICE_CONFIDENCE_THRESHOLD` | `0.85` | Confiança mínima exigida da IA |
 
-Guarde a chave: trocá-la invalida a verificação de todo o livro já gravado.
+Guarde as chaves: trocá-las invalida a verificação de todo o livro já gravado. Para gerar uma semente Ed25519 própria: `python -c 'import secrets; print(secrets.token_hex(32))'`.
 
 ## Endpoints
 
@@ -33,7 +34,10 @@ Guarde a chave: trocá-la invalida a verificação de todo o livro já gravado.
 | POST | `/api/v1/reject` | Rejeita a proposta com justificativa |
 | GET | `/api/v1/transactions?status=&limit=` | Fila com resumo por status |
 | GET | `/api/v1/transactions/{tx_id}` | Detalhe com conteúdo e eventos do livro |
+| GET | `/api/v1/transactions/{tx_id}/proof` | Registros assinados de uma transação, para conferência por terceiros |
 | GET | `/api/v1/ledger/verify` | Verifica sequência, encadeamento, assinaturas e consistência |
+| GET | `/api/v1/ledger/public-key` | Chave pública Ed25519 (hex) e sua impressão digital |
+| GET | `/api/v1/ledger/export` | Livro completo com as assinaturas Ed25519 |
 | GET | `/api/v1/health` | Saúde do serviço |
 
 Exemplo de chancela:
@@ -46,6 +50,20 @@ curl -X POST localhost:8000/api/v1/seal -H 'Content-Type: application/json' -d '
   "acknowledged_violations": ["LACUNA_JURIDICA", "CONFIANCA_BAIXA"]
 }'
 ```
+
+## Verificação por terceiros
+
+Cada registro do livro leva uma assinatura Ed25519 sobre o seu conteúdo, o `hash` e o `prev_hash`. Quem recebe o livro não precisa de nenhum segredo do servidor para conferi-lo: basta a chave pública, obtida por um canal confiável (publicada pela organização, anexada ao contrato).
+
+```bash
+curl -s localhost:8000/api/v1/ledger/public-key          # publique o campo "hex"
+curl -s localhost:8000/api/v1/ledger/export > livro.json
+python verificar_publico.py livro.json --chave <hex>     # sai com 0 se íntegro
+```
+
+`verificar_publico.py` só depende de `cryptography` e não importa o backend; pode ser entregue ao auditor sozinho. Ele confere sequência, encadeamento desde a gênese e cada assinatura. Para um selo isolado, `GET /api/v1/transactions/{tx_id}/proof` traz os registros da transação (o conteúdo aparece só como `content_sha256`, que o auditor confere com o documento em mãos); o mesmo script verifica as assinaturas, e o encadeamento com o resto do livro pede a exportação completa.
+
+Registros gravados antes desta versão não têm assinatura Ed25519: continuam protegidos pelo HMAC no `/ledger/verify`, mas a verificação pública os aponta como não assinados.
 
 ## Adicionando uma regra
 
@@ -70,12 +88,13 @@ Na interface, acrescente o nome legível em `NOMES` (`static/index.html`); sem i
 pytest -q
 ```
 
-Cobrem validação, ciência obrigatória, duplicidade (409), concorrência (8 chancelas simultâneas → exatamente uma passa), encadeamento linear e detecção de adulteração no livro, na projeção e com chave errada.
+Cobrem validação, ciência obrigatória, duplicidade (409), concorrência (8 chancelas simultâneas → exatamente uma passa), encadeamento linear, detecção de adulteração no livro, na projeção e com chave errada, e a verificação pública Ed25519 (exportação, prova de selo, registros alterados, removidos ou reordenados, chave trocada e banco legado).
 
 Para ver a detecção na prática, altere um registro direto no banco (os triggers bloqueiam `UPDATE`, então remova-os antes, simulando um atacante com acesso ao arquivo) e chame `/api/v1/ledger/verify`: a resposta aponta o `seq` adulterado, e a interface exibe o alerta.
 
 ## Limites conhecidos
 
-- HMAC é simétrico: quem verifica também consegue assinar. Para verificação por terceiros, use Ed25519 ou carimbo do tempo (RFC 3161 / ICP-Brasil).
+- A assinatura Ed25519 prova quem assinou, não quando: o operador do servidor, com a chave privada, ainda poderia reescrever o livro inteiro. Para ancorar no tempo, publique o `head_hash` periodicamente ou use carimbo do tempo (RFC 3161 / ICP-Brasil).
+- Não há rotação de chave: a mesma chave pública precisa conferir todo o livro.
 - A identidade do operador é declarada, não autenticada. Próximo passo: autenticação.
 - O rótulo `CUSTODIA_PROBATORIA_CPC` descreve a intenção; validade jurídica depende de análise jurídica própria.
