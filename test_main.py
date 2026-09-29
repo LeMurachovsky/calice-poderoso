@@ -15,17 +15,37 @@ RISCO = {"document_id": "DOC-1", "content": "Liberação de pagamento ao fornece
 CONFORME = {**RISCO, "document_id": "DOC-2", "liability_clause": True, "confidence_score": 0.95}
 
 
+SENHA = "senha-de-teste-longa"
+
+
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def anonimo(tmp_path, monkeypatch):
     monkeypatch.setenv("CALICE_DB_PATH", str(tmp_path / "teste.db"))
     monkeypatch.setenv("CALICE_SIGNING_KEY", "chave-de-teste")
     with TestClient(main.app) as c:
+        main.criar_operador("marina", "Operadora Teste", SENHA)
         yield c
 
 
+@pytest.fixture
+def client(anonimo):
+    """Cliente já autenticado como a operadora `marina`."""
+    anonimo.headers["Authorization"] = f"Bearer {entrar(anonimo)}"
+    return anonimo
+
+
+def entrar(client, login="marina", senha=SENHA) -> str:
+    r = client.post("/api/v1/auth/login", json={"login": login, "password": senha})
+    assert r.status_code == 200, r.text
+    return r.json()["token"]
+
+
+def bearer(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
 def decisao(tx_id: str, **extra) -> dict:
-    return {"transaction_id": tx_id, "operator_name": "Operadora Teste",
-            "notes": "Revisado contra o contrato original.", **extra}
+    return {"transaction_id": tx_id, "notes": "Revisado contra o contrato original.", **extra}
 
 
 def interceptar(client, payload=CONFORME) -> dict:
@@ -149,3 +169,105 @@ def test_sem_a_chave_nao_se_recalcula_a_cadeia(client):
         assert client.get("/api/v1/ledger/verify").json()["integro"] is False
     finally:
         main.settings = original
+
+
+# ── Autenticação do operador ──────────────────────────────────────────────
+
+@pytest.mark.parametrize("rota", ["/api/v1/seal", "/api/v1/reject"])
+def test_decisao_sem_login_e_recusada(anonimo, rota):
+    tx = interceptar(anonimo)
+    r = anonimo.post(rota, json=decisao(tx["transaction_id"]))
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"] == "Bearer"
+    assert anonimo.get(f"/api/v1/transactions/{tx['transaction_id']}").json()["status"] == "PRONTO_PARA_CHANCELA"
+
+
+def test_token_inventado_e_recusado(anonimo):
+    tx = interceptar(anonimo)
+    r = anonimo.post("/api/v1/seal", json=decisao(tx["transaction_id"]), headers=bearer("inventado"))
+    assert r.status_code == 401
+
+
+@pytest.mark.parametrize("login,senha", [("marina", "senha-errada-123"), ("ninguem", SENHA)])
+def test_login_invalido_nao_revela_o_motivo(anonimo, login, senha):
+    r = anonimo.post("/api/v1/auth/login", json={"login": login, "password": senha})
+    assert r.status_code == 401
+    assert r.json()["detail"] == "Login ou senha inválidos."
+
+
+def test_login_devolve_o_operador(anonimo):
+    r = anonimo.post("/api/v1/auth/login", json={"login": "  MARINA ", "password": SENHA})
+    assert r.status_code == 200
+    assert r.json()["operador"] == {"login": "marina", "nome": "Operadora Teste"}
+    assert anonimo.get("/api/v1/auth/me", headers=bearer(r.json()["token"])).json()["login"] == "marina"
+
+
+def test_operador_vem_da_sessao_e_nao_do_corpo(client):
+    tx = interceptar(client)
+    r = client.post("/api/v1/seal", json=decisao(tx["transaction_id"], operator_name="Diretor Presidente"))
+    assert r.status_code == 200
+    assert r.json()["juizo_humano"]["operator"] == "Operadora Teste"
+    assert r.json()["juizo_humano"]["operator_login"] == "marina"
+    assert client.get(f"/api/v1/transactions/{tx['transaction_id']}").json()["decisao"]["operador"] == "Operadora Teste"
+
+
+def test_livro_registra_o_login_do_operador(client):
+    tx = interceptar(client)
+    client.post("/api/v1/reject", json=decisao(tx["transaction_id"]))
+    with sqlite3.connect(main.settings.db_path) as db:
+        dados = db.execute("SELECT dados FROM ledger WHERE evento = 'REJEICAO'").fetchone()[0]
+    assert '"operador_login":"marina"' in dados
+    assert client.get("/api/v1/ledger/verify").json()["integro"] is True
+
+
+def test_logout_invalida_o_token(anonimo):
+    token = entrar(anonimo)
+    assert anonimo.post("/api/v1/auth/logout", headers=bearer(token)).status_code == 204
+    assert anonimo.get("/api/v1/auth/me", headers=bearer(token)).status_code == 401
+
+
+def test_sessao_expirada_e_recusada(anonimo):
+    token = entrar(anonimo)
+    with sqlite3.connect(main.settings.db_path) as db:
+        db.execute("UPDATE sessoes SET expira_em = '2000-01-01T00:00:00.000+00:00'")
+    assert anonimo.get("/api/v1/auth/me", headers=bearer(token)).status_code == 401
+
+
+def test_operador_desativado_perde_acesso(anonimo):
+    token = entrar(anonimo)
+    main.definir_ativo("marina", False)
+    assert anonimo.get("/api/v1/auth/me", headers=bearer(token)).status_code == 401
+    assert anonimo.post("/api/v1/auth/login", json={"login": "marina", "password": SENHA}).status_code == 401
+    main.definir_ativo("marina", True)
+    entrar(anonimo)
+
+
+def test_troca_de_senha_encerra_sessoes(anonimo):
+    token = entrar(anonimo)
+    main.definir_senha("marina", "outra-senha-bem-longa")
+    assert anonimo.get("/api/v1/auth/me", headers=bearer(token)).status_code == 401
+    entrar(anonimo, senha="outra-senha-bem-longa")
+
+
+def test_banco_nao_guarda_senha_nem_token_em_claro(anonimo):
+    token = entrar(anonimo)
+    with sqlite3.connect(main.settings.db_path) as db:
+        despejo = "\n".join(db.iterdump())
+    assert SENHA not in despejo and token not in despejo
+
+
+@pytest.mark.parametrize("login,nome,senha", [
+    ("marina", "Outra Marina", SENHA),     # login repetido
+    ("x", "Nome Válido", SENHA),           # login curto
+    ("joao", "João Silva", "curta"),       # senha curta
+])
+def test_criacao_de_operador_valida_dados(anonimo, login, nome, senha):
+    with pytest.raises(ValueError):
+        main.criar_operador(login, nome, senha)
+
+
+def test_cli_cria_operador(anonimo, monkeypatch, capsys):
+    monkeypatch.setattr("getpass.getpass", lambda _: "senha-do-joao-123")
+    assert main.cli(["operador", "criar", "joao", "João Silva"]) == 0
+    assert "joao" in capsys.readouterr().out
+    entrar(anonimo, "joao", "senha-do-joao-123")
