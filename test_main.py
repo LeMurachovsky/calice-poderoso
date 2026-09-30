@@ -1,3 +1,5 @@
+import asyncio
+import json
 import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -612,3 +614,304 @@ def test_desfecho_apagado_e_detectado(client):
     with sqlite3.connect(main.settings.db_path) as db:
         db.execute("DELETE FROM desfechos_topico")
     assert client.get("/api/v1/ledger/verify").json()["integro"] is False
+
+
+# ── Selo Institucional (CLC-AUTH) ─────────────────────────────────────────
+
+def test_emitir_e_decodificar_selo_calice():
+    conteudo = b"Minuta contratual de alto risco"
+    selo = main.emitir_selo_calice(conteudo, thread_ref="PROC-2026")
+    assert selo.startswith("CLC-AUTH::PROC-2026::")
+    partes = selo.split("::")
+    assert len(partes) == 4
+    info = main.decodificar_selo(selo)
+    assert info["padrao"] == "CLC-AUTH"
+    assert info["thread_ref"] == "PROC-2026"
+    assert len(info["digest_hex"]) == 64
+
+
+def test_chancela_emite_selo_institucional(client):
+    tx_id = interceptar(client)["transaction_id"]
+    r = client.post("/api/v1/seal", json=decisao(tx_id, acknowledged_violations=["LACUNA_JURIDICA"]))
+    assert r.status_code == 200
+    selo_inst = r.json()["selo_calice"]["selo_institucional"]
+    assert selo_inst.startswith(f"CLC-AUTH::{tx_id}::")
+
+    # Confere na rota de detalhe da transação
+    det = client.get(f"/api/v1/transactions/{tx_id}").json()
+    assert det["decisao"]["selo_institucional"] == selo_inst
+
+    # Decodifica pela rota pública de validação de selo
+    dec = client.get("/api/v1/seal/decode", params={"selo": selo_inst})
+    assert dec.status_code == 200
+    assert dec.json()["valido"] is True
+    assert dec.json()["detalhes"]["thread_ref"] == tx_id
+
+
+def test_decodificacao_de_selo_invalido_rejeita(client):
+    r = client.get("/api/v1/seal/decode", params={"selo": "SELO_INVALIDO_SEM_FORMATO"})
+    assert r.status_code == 400
+
+
+# ── Políticas de Cliente e Decurso de Prazo (SLA) ─────────────────────────
+
+def test_consultar_politica_padrao_cliente(client):
+    r = client.get("/api/v1/policies/CLI_1029")
+    assert r.status_code == 200
+    dados = r.json()
+    assert dados["politica_cliente_id"] == "CLI_1029"
+    assert "FINANCEIRO_PIX" in dados["regras_de_operacao"]
+    assert dados["regras_de_operacao"]["FINANCEIRO_PIX"]["prazo_segundos"] == 120
+    assert dados["regras_de_operacao"]["FINANCEIRO_PIX"]["acao_no_esgotamento"] == "CANCELAMENTO_AUTOMATICO"
+
+
+def test_cadastrar_nova_politica_cliente(client):
+    payload = {
+        "politica_cliente_id": "CLI_EMPRESA_X",
+        "regras_de_operacao": {
+            "PAGAMENTO_FORNECEDOR": {
+                "limiar_corte": 0.50,
+                "prazo_segundos": 60,
+                "acao_no_esgotamento": "CANCELAMENTO_AUTOMATICO",
+            }
+        },
+    }
+    r = client.post("/api/v1/policies", json=payload)
+    assert r.status_code == 201
+    consulta = client.get("/api/v1/policies/CLI_EMPRESA_X").json()
+    assert consulta["regras_de_operacao"]["PAGAMENTO_FORNECEDOR"]["prazo_segundos"] == 60
+
+
+def test_interceptacao_amarra_prazo_limite_e_tolerancia(client):
+    payload = {
+        **CONFORME,
+        "document_id": "PIX-1029-A",
+        "politica_cliente_id": "CLI_1029",
+        "tipo_operacao": "FINANCEIRO_PIX",
+        "confidence_score": 0.88,
+    }
+    r = client.post("/api/v1/intercept", json=payload)
+    assert r.status_code == 201
+    dados = r.json()
+    assert dados["janela"]["janela_segundos"] == 120
+    assert dados["janela"]["acao_no_esgotamento"] == "CANCELAMENTO_AUTOMATICO"
+    assert "prazo_limite_utc" in dados["ledger"]["dados"]
+
+
+def test_decurso_de_prazo_cancela_automaticamente(client):
+    payload = {
+        **CONFORME,
+        "document_id": "PIX-TIMEOUT-TEST",
+        "politica_cliente_id": "CLI_1029",
+        "tipo_operacao": "FINANCEIRO_PIX",
+    }
+    tx_id = client.post("/api/v1/intercept", json=payload).json()["transaction_id"]
+
+    # Simula decurso forçando o prazo no passado
+    with sqlite3.connect(main.settings.db_path) as db:
+        passado = "2020-01-01T00:00:00.000+00:00"
+        db.execute("UPDATE transacoes SET prazo = ? WHERE tx_id = ?", (passado, tx_id))
+
+    # Executa varredura de decurso
+    n = main.varrer_prazos()
+    assert n >= 1
+
+    # Verifica status e livro
+    detalhe = client.get(f"/api/v1/transactions/{tx_id}").json()
+    assert detalhe["status"] == "CANCELADO_POR_TIMEOUT"
+    assert detalhe["decisao"]["operador"] == "SISTEMA (AUTOMAÇÃO SLA)"
+
+    # Livro-razão deve permanecer 100% íntegro
+    v = client.get("/api/v1/ledger/verify").json()
+    assert v["integro"] is True
+
+
+def test_prazo_customizado_no_payload_prevalece(client):
+    payload = {
+        **CONFORME,
+        "document_id": "CUSTOM-PRAZO-01",
+        "confidence_score": 0.95,
+        "prazo_customizado_segundos": 450,
+    }
+    r = client.post("/api/v1/intercept", json=payload)
+    assert r.status_code == 201
+    dados = r.json()
+    assert dados["janela"]["prazo_segundos"] == 450
+    bloco_ledger = json.loads(dados["ledger"]["dados"])
+    assert bloco_ledger["prazo_segundos"] == 450
+    assert "prazo_limite_utc" in bloco_ledger
+
+
+def test_calculo_tempo_por_confianca(client):
+    # Teste unitário da função direta
+    assert main.calcular_tempo_por_confianca(0.95) == 7200
+    assert main.calcular_tempo_por_confianca(0.85) == 7200
+    assert main.calcular_tempo_por_confianca(0.70) == 1800
+    assert main.calcular_tempo_por_confianca(0.50) == 1800
+    assert main.calcular_tempo_por_confianca(0.40) == 300
+    assert main.calcular_tempo_por_confianca(0.10) == 300
+
+    # Teste via API sem prazo customizado e sem politica_cliente_id
+    # Confiança baixa (< 0.50) => 300s
+    p_baixa = {**CONFORME, "document_id": "CONF-BAIXA", "confidence_score": 0.45}
+    r_baixa = client.post("/api/v1/intercept", json=p_baixa).json()
+    assert r_baixa["janela"]["prazo_segundos"] == 300
+    assert json.loads(r_baixa["ledger"]["dados"])["prazo_segundos"] == 300
+
+    # Confiança média (0.75) => 1800s
+    p_media = {**CONFORME, "document_id": "CONF-MEDIA", "confidence_score": 0.75}
+    r_media = client.post("/api/v1/intercept", json=p_media).json()
+    assert r_media["janela"]["prazo_segundos"] == 1800
+
+    # Confiança alta (0.90) => 7200s
+    p_alta = {**CONFORME, "document_id": "CONF-ALTA", "confidence_score": 0.90}
+    r_alta = client.post("/api/v1/intercept", json=p_alta).json()
+    assert r_alta["janela"]["prazo_segundos"] == 7200
+
+
+def test_processar_interceptacao_helper():
+    # Com prazo customizado
+    ev1 = {"score": 0.40, "tipo_operacao": "TESTE", "prazo_customizado_segundos": 60}
+    bloco1 = main.processar_interceptacao(ev1)
+    assert bloco1["prazo_segundos"] == 60
+    assert "prazo_limite_utc" in bloco1
+
+    # Sem prazo customizado, fallback para confiança
+    ev2 = {"score": 0.92, "tipo_operacao": "TESTE"}
+    bloco2 = main.processar_interceptacao(ev2)
+    assert bloco2["prazo_segundos"] == 7200
+
+
+def test_calice_engine_avaliar_stream():
+    engine = main.calice_engine
+
+    # Texto seguro com cláusula
+    score_ok, viol_ok = engine.avaliar_stream("Minuta de contrato contendo cláusula de responsabilidade expressa.")
+    assert score_ok >= 0.85
+    assert viol_ok is None
+
+    # Gatilho crítico: sem cláusula
+    score_viol, viol_cod = engine.avaliar_stream("Transferência bancária sem cláusula de garantia prévia.")
+    assert score_viol < 0.85
+    assert viol_cod == "LACUNA_JURIDICA"
+
+    # Termo de dispersão
+    score_disp, viol_disp = engine.avaliar_stream("Valor estimado sem base probatória conclusiva.")
+    assert score_disp < 0.85
+
+
+def test_executar_geracao_sob_custodia_intercepta_ao_vivo(client):
+    # Executa a geração que aciona corte ao vivo no chunk de risco
+    tx = main.executar_geracao_sob_custodia_calice(
+        prompt_estatistico="Elabore ordem de transferência emergencial sem garantia expressa.",
+        limiar_corte=0.85,
+        prazo_sla_segundos=1200,
+        documento_id="DOC-STREAM-TEST",
+    )
+    assert "transaction_id" in tx
+    assert tx["status"] == "FATOR_DE_PAUSA_ATIVADO"
+    assert tx["janela"]["prazo_segundos"] == 1200
+    assert any(v["codigo"] in ("CONFIANCA_BAIXA", "LACUNA_JURIDICA") for v in tx["violations"])
+
+    # Verifica integridade do livro-razão após corte ao vivo
+    verificacao = client.get("/api/v1/ledger/verify").json()
+    assert verificacao["integro"] is True
+
+
+def test_api_stream_generate_intercepta(client):
+    payload = {
+        "prompt": "Gerar parecer financeiro emergencial sem cláusula",
+        "limiar_corte": 0.80,
+        "prazo_sla_segundos": 600,
+        "documento_id": "DOC-STREAM-API",
+    }
+    r = client.post("/api/v1/stream/generate", json=payload)
+    assert r.status_code == 200
+    dados = r.json()
+    assert dados["status"] == "FATOR_DE_PAUSA_ATIVADO"
+    assert dados["janela"]["prazo_segundos"] == 600
+
+
+def test_calcular_demanda():
+    # Amostras conformes
+    res1 = main.calcular_demanda([0.88, 0.92, 0.85, 0.90])
+    assert res1["verificado"] is True
+    assert res1["status_demanda"] == "CONFORME"
+    assert res1["total_amostras"] == 4
+    assert res1["media_confianca"] >= 0.85
+
+    # Amostras com alta dispersão / baixa média
+    res2 = main.calcular_demanda([0.40, 0.50, 0.35])
+    assert res2["status_demanda"] == "DISPERSAO_ALTA"
+    assert res2["media_confianca"] < 0.85
+
+
+@pytest.mark.anyio
+async def test_bancada_concorrente():
+    from bancada_concorrente import CaliceLedgerConcorrente, disparar_evento_teste
+    ledger = CaliceLedgerConcorrente(limiar_confianca=0.85)
+    tarefas = [disparar_evento_teste(ledger, f"CLIENTE-{i}", i + 1) for i in range(10)]
+    resultados = await asyncio.gather(*tarefas)
+
+    assert len(resultados) == 10
+    assert len(ledger.registos) == 10
+    # Verifica que todos os blocos foram selados de 1 a 10 de forma estrita
+    blocos = sorted(r["bloco"] for r in ledger.registos)
+    assert blocos == list(range(1, 11))
+    # Verifica integridade da cadeia de hashes
+    for idx in range(1, len(ledger.registos)):
+        atual = ledger.registos[idx]
+        anterior = ledger.registos[idx - 1]
+        assert atual["hash_anterior_completo"] == anterior["hash_completo"]
+
+
+def test_interceptar_alias_e_payload_portugues(client):
+    payload = {
+        "documento_id": "DOC-PORTUGUES-001",
+        "conteudo_proposto": "Operação financeira de teste com chaves em português",
+        "confianca_modelo": 0.92,
+        "contem_clausula": True,
+        "janela_sla_segundos": 1800,
+    }
+    r1 = client.post("/api/interceptar", json=payload)
+    assert r1.status_code == 201
+    d1 = r1.json()
+    assert d1["status"] == "PRONTO_PARA_CHANCELA"
+    assert d1["janela"]["prazo_segundos"] == 1800
+
+    # Teste no alias /api/v1/interceptar
+    payload["documento_id"] = "DOC-PORTUGUES-002"
+    payload["confianca_modelo"] = 0.50
+    r2 = client.post("/api/v1/interceptar", json=payload)
+    assert r2.status_code == 201
+    d2 = r2.json()
+    assert d2["status"] == "FATOR_DE_PAUSA_ATIVADO"
+    assert len(d2["violations"]) > 0
+
+
+@pytest.mark.anyio
+async def test_disparo_concorrente_api(anonimo):
+    import httpx
+
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async def disparar(i: int):
+            score = 0.45 if i % 2 == 0 else 0.88
+            payload = {
+                "documento_id": f"DOC-CONCORRENTE-{i:03d}",
+                "conteudo_proposto": f"Operação financeira de teste concorrente #{i}",
+                "confianca_modelo": score,
+                "contem_clausula": True,
+                "janela_sla_segundos": 1800,
+            }
+            res = await client.post("/api/interceptar", json=payload)
+            return res
+
+        resps = await asyncio.gather(*(disparar(i) for i in range(1, 11)))
+        assert len(resps) == 10
+        assert all(r.status_code == 201 for r in resps)
+        # Todos os 10 eventos foram registrados no livro-razão
+        with main.leitura() as conn:
+            txs = conn.execute("SELECT COUNT(*) as c FROM transacoes WHERE document_id LIKE 'DOC-CONCORRENTE-%'").fetchone()
+            assert txs["c"] == 10
+

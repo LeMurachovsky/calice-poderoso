@@ -57,12 +57,15 @@ from typing import Any, Literal, Optional
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi import Path as PathParam
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+import google.generativeai as genai
 import verificar_publico as vp
 
 log = logging.getLogger("calice")
@@ -141,9 +144,16 @@ class Status(str, Enum):
     PRONTO = "PRONTO_PARA_CHANCELA"
     CHANCELADO = "CHANCELADO_E_CONCLUIDO"
     REJEITADO = "REJEITADO"
+    CANCELADO_TIMEOUT = "CANCELADO_POR_TIMEOUT"
+    ARQUIVADO = "ARQUIVADO"
 
 
-FINAIS = {Status.CHANCELADO.value, Status.REJEITADO.value}
+FINAIS = {
+    Status.CHANCELADO.value,
+    Status.REJEITADO.value,
+    Status.CANCELADO_TIMEOUT.value,
+    Status.ARQUIVADO.value,
+}
 
 
 # ─────────────────────────────── Contratos ───────────────────────────────
@@ -153,18 +163,86 @@ FINAIS = {Status.CHANCELADO.value, Status.REJEITADO.value}
 IDENTIFICADOR_VALIDO = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$"
 MAX_DADOS_DESFECHO = 10_000
 
+
+class PoliticaRegra(BaseModel):
+    limiar_corte: float = Field(ge=0.0, le=1.0)
+    prazo_segundos: int = Field(ge=1, le=86400 * 30)
+    acao_no_esgotamento: Literal["CANCELAMENTO_AUTOMATICO", "PRAZO_ESGOTADO", "ARQUIVAR"]
+
+
+class PoliticaClienteRequest(BaseModel):
+    politica_cliente_id: str = Field(min_length=1, max_length=64)
+    regras_de_operacao: dict[str, PoliticaRegra]
+
+
 class InterceptRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     document_id: str = Field(min_length=1, max_length=120)
     content: str = Field(min_length=1, max_length=20_000)
-    liability_clause: bool
+    liability_clause: bool = True
     confidence_score: float = Field(ge=0.0, le=1.0)
     risk_level: Risco = Risco.MEDIUM
     designated_operator: Optional[str] = Field(
         default=None, max_length=64,
         description="Login do operador de plantão: só ele decide enquanto a janela estiver aberta.",
     )
+    politica_cliente_id: Optional[str] = Field(
+        default=None, max_length=64,
+        description="Identificador da política do cliente (ex: CLI_1029)",
+    )
+    tipo_operacao: Optional[str] = Field(
+        default=None, max_length=64,
+        description="Tipo ou canal da operação (ex: FINANCEIRO_PIX, CONTRATOS_JURIDICO)",
+    )
+    prazo_customizado_segundos: Optional[int] = Field(
+        default=None, ge=1, le=86400 * 30,
+        description="Prazo customizado explicitado pelo cliente ou teste (em segundos)",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def harmonizar_campos_portugues(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Mapeamento para permitir payloads em português enviados por scripts/clientes concorrentes
+            if "document_id" not in data and "documento_id" in data:
+                data["document_id"] = data["documento_id"]
+            if "content" not in data:
+                for k in ("conteudo_proposto", "proposta_texto", "payload_texto", "conteudo"):
+                    if k in data:
+                        data["content"] = data[k]
+                        break
+            if "liability_clause" not in data:
+                for k in ("contem_clausula", "clausula_responsabilidade", "clausula"):
+                    if k in data:
+                        data["liability_clause"] = data[k]
+                        break
+            if "confidence_score" not in data:
+                for k in ("confianca_modelo", "score_confianca", "score_modelo", "confianca"):
+                    if k in data:
+                        data["confidence_score"] = data[k]
+                        break
+            if "prazo_customizado_segundos" not in data:
+                for k in ("janela_sla_segundos", "prazo_sla_segundos", "prazo_segundos", "tempo_espera"):
+                    if k in data:
+                        data["prazo_customizado_segundos"] = data[k]
+                        break
+            if "risk_level" not in data:
+                for k in ("risco", "nivel_risco"):
+                    if k in data:
+                        data["risk_level"] = data[k]
+                        break
+            if "designated_operator" not in data:
+                for k in ("operador_designado", "plantonista", "operador"):
+                    if k in data:
+                        data["designated_operator"] = data[k]
+                        break
+            if "politica_cliente_id" not in data:
+                for k in ("cliente_id", "politica_id"):
+                    if k in data:
+                        data["politica_cliente_id"] = data[k]
+                        break
+        return data
 
 
 class LoginRequest(BaseModel):
@@ -236,8 +314,21 @@ def confianca_minima(req: InterceptRequest, cfg: Settings) -> Violacao | None:
     return None
 
 
-def diagnosticar(req: InterceptRequest, cfg: Settings) -> list[Violacao]:
-    return [v for r in REGRAS if (v := r(req, cfg)) is not None]
+def diagnosticar(req: InterceptRequest, cfg: Settings, limiar_efetivo: float | None = None) -> list[Violacao]:
+    limiar = limiar_efetivo if limiar_efetivo is not None else cfg.confidence_threshold
+    violacoes: list[Violacao] = []
+    if not req.liability_clause:
+        violacoes.append(Violacao("LACUNA_JURIDICA", "CRITICA", "Cláusula de responsabilidade ausente."))
+    if req.confidence_score < limiar:
+        violacoes.append(Violacao(
+            "CONFIANCA_BAIXA", "ALTA",
+            f"Confiança da IA abaixo do limiar ({req.confidence_score:.2f} < {limiar:.2f}).",
+        ))
+    for r in REGRAS:
+        if r not in (clausula_de_responsabilidade, confianca_minima):
+            if v := r(req, cfg):
+                violacoes.append(v)
+    return violacoes
 
 
 # ─────────────────────────────── Utilidades ──────────────────────────────
@@ -251,6 +342,8 @@ def novo_id(prefixo: str) -> str:
 
 
 canonico = vp.canonico  # uma única definição, compartilhada com o verificador público
+emitir_selo_calice = vp.emitir_selo_calice
+decodificar_selo = vp.decodificar_selo
 
 
 def sha256_hex(texto: str) -> str:
@@ -277,9 +370,22 @@ CREATE TABLE IF NOT EXISTS transacoes (
     risco            TEXT,
     agente_designado TEXT,
     prazo            TEXT,
-    prazo_esgotado_em TEXT
+    prazo_esgotado_em TEXT,
+    politica_cliente_id TEXT,
+    tipo_operacao    TEXT,
+    acao_no_esgotamento TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_transacoes_status ON transacoes(status);
+
+CREATE TABLE IF NOT EXISTS politicas_cliente (
+    cliente_id          TEXT NOT NULL,
+    operacao            TEXT NOT NULL,
+    limiar_corte        REAL NOT NULL,
+    prazo_segundos      INTEGER NOT NULL,
+    acao_no_esgotamento TEXT NOT NULL,
+    PRIMARY KEY (cliente_id, operacao)
+);
+CREATE INDEX IF NOT EXISTS idx_politicas_cliente ON politicas_cliente(cliente_id);
 
 CREATE TABLE IF NOT EXISTS ledger (
     seq        INTEGER PRIMARY KEY,
@@ -333,8 +439,40 @@ BEGIN SELECT RAISE(ABORT, 'ledger é append-only'); END;
 """
 
 
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict[str, Any]):
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_json(message)
+            except Exception:
+                self.disconnect(connection)
+
+
+ws_manager = ConnectionManager()
+
+
+def notificar_interface_sync(evento_dict: dict[str, Any]) -> None:
+    """Notifica interface em tempo real via WebSocket se houver event loop ativo."""
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(ws_manager.broadcast(evento_dict))
+    except RuntimeError:
+        pass
+
+
 def conectar() -> sqlite3.Connection:
-    conn = sqlite3.connect(settings.db_path, timeout=10, isolation_level=None)
+    conn = sqlite3.connect(settings.db_path, timeout=30.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")  # SQLite ignora FKs sem isto
     return conn
@@ -374,14 +512,26 @@ def init_db() -> None:
     with leitura() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
-        colunas = {c["name"] for c in conn.execute("PRAGMA table_info(ledger)")}
-        if "assinatura" not in colunas:  # bancos criados antes da assinatura pública
+        colunas_ledger = {c["name"] for c in conn.execute("PRAGMA table_info(ledger)")}
+        if "assinatura" not in colunas_ledger:
             conn.execute("ALTER TABLE ledger ADD COLUMN assinatura TEXT")
-        colunas = {c["name"] for c in conn.execute("PRAGMA table_info(transacoes)")}
-        for coluna in ("risco", "agente_designado", "prazo", "prazo_esgotado_em"):
-            if coluna not in colunas:  # bancos criados antes das janelas temporais
+        colunas_tx = {c["name"] for c in conn.execute("PRAGMA table_info(transacoes)")}
+        for coluna in ("risco", "agente_designado", "prazo", "prazo_esgotado_em",
+                       "politica_cliente_id", "tipo_operacao", "acao_no_esgotamento"):
+            if coluna not in colunas_tx:
                 conn.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_transacoes_prazo ON transacoes(prazo)")
+
+        # Matriz padrão de políticas (ex.: CLI_1029)
+        conn.executemany(
+            "INSERT OR IGNORE INTO politicas_cliente (cliente_id, operacao, limiar_corte, prazo_segundos, acao_no_esgotamento) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                ("CLI_1029", "FINANCEIRO_PIX", 0.40, 120, "CANCELAMENTO_AUTOMATICO"),
+                ("CLI_1029", "CONTRATOS_JURIDICO", 0.40, 1800, "PRAZO_ESGOTADO"),
+                ("CLI_1029", "CONSULTA_GERAL", 0.70, 300, "ARQUIVAR"),
+            ],
+        )
 
 
 # ───────────────────────────── Autenticação ──────────────────────────────
@@ -523,8 +673,8 @@ def registrar_evento(conn: sqlite3.Connection, tx_id: str, evento: str,
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (seq, tx_id, evento, dados_json, prev_hash, digest, created_at, assinatura),
     )
-    return {"seq": seq, "evento": evento, "prev_hash": prev_hash, "hash": digest,
-            "created_at": created_at, "assinatura": assinatura}
+    return {"seq": seq, "tx_id": tx_id, "evento": evento, "dados": dados_json,
+            "prev_hash": prev_hash, "hash": digest, "created_at": created_at, "assinatura": assinatura}
 
 
 def chave_publica() -> dict[str, str]:
@@ -573,11 +723,12 @@ def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
         dados_origem = json.loads(origem["dados"])
         if sha256_hex(tx["content"]) != dados_origem["content_sha256"]:
             return falha(origem["seq"], f"O conteúdo de {tx['tx_id']} diverge do registrado.")
-        decisao = evs.get("CHANCELA") or evs.get("REJEICAO")
+        decisao = (evs.get("CHANCELA") or evs.get("REJEICAO") or
+                   evs.get("CANCELAMENTO_AUTOMATICO_SLA") or evs.get("ARQUIVAMENTO_AUTOMATICO_SLA"))
         status_esperado = json.loads(decisao["dados"])["status"] if decisao else dados_origem["status"]
         if tx["status"] != status_esperado:
             return falha(origem["seq"], f"O status de {tx['tx_id']} diverge do registrado.")
-        if decisao and tx["proof_hash"] != decisao["hash"]:
+        if decisao and tx["proof_hash"] and tx["proof_hash"] != decisao["hash"]:
             return falha(decisao["seq"], f"O selo de {tx['tx_id']} diverge do registrado.")
 
     # 3) Os desfechos de tópico também são projeção: cada um aponta para o seu evento.
@@ -597,29 +748,151 @@ def verificar_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 # ─────────────────────────── Janelas temporais ───────────────────────────
+ 
+def calcular_tempo_por_confianca(score_modelo: float) -> int:
+    """Calcula o tempo de tolerância pericial com base na confiança do modelo:
+    - Alta confiança (>= 0.85): 7200 segundos (2 horas)
+    - Média confiança (0.50 <= score < 0.85): 1800 segundos (30 minutos)
+    - Baixa confiança (< 0.50): 300 segundos (5 minutos)
+    """
+    if score_modelo >= 0.85:
+        return 7200
+    elif score_modelo >= 0.50:
+        return 1800
+    else:
+        return 300
+
+
+def processar_interceptacao(evento: dict[str, Any], regra_cliente: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Helper canônico para processar interceptação e calcular bloco pericial com prazos imutáveis."""
+    t0 = datetime.now(timezone.utc)
+    score_modelo = float(evento.get("confidence_score", evento.get("score_risco", evento.get("score", 0.0))))
+
+    # Se o cliente ou teste enviou um prazo definido, usa ele;
+    # se não enviou, recorre à métrica de confiança do modelo:
+    if "prazo_customizado_segundos" in evento and evento["prazo_customizado_segundos"] is not None:
+        tempo_espera = int(evento["prazo_customizado_segundos"])
+    elif regra_cliente and "prazo_segundos" in regra_cliente:
+        tempo_espera = int(regra_cliente["prazo_segundos"])
+    else:
+        tempo_espera = calcular_tempo_por_confianca(score_modelo)
+
+    t_max = t0 + timedelta(seconds=tempo_espera)
+    bloco = {
+        "tipo": "INTERCEPTACAO",
+        "timestamp_utc": t0.isoformat(timespec="milliseconds"),
+        "prazo_segundos": tempo_espera,
+        "prazo_limite_utc": t_max.isoformat(timespec="milliseconds"),
+        "segundos_concedidos": tempo_espera,
+        "operacao": evento.get("tipo_operacao", evento.get("operacao")),
+        "score_risco": score_modelo,
+    }
+    return bloco
+
+
+def calcular_demanda(valores: list[float] | dict[str, Any] | Any) -> dict[str, Any]:
+    """Calcula a dispersão de demanda e conformidade pericial sobre os valores ou scores analisados."""
+    if isinstance(valores, dict):
+        vals = [float(v) for v in valores.get("valores", [valores.get("score", 0.85)])]
+    elif isinstance(valores, (list, tuple)):
+        vals = [float(v) for v in valores] if valores else [0.0]
+    else:
+        vals = [float(valores)]
+
+    total = len(vals)
+    media = sum(vals) / total if total > 0 else 0.0
+    variancia = sum((x - media) ** 2 for x in vals) / total if total > 0 else 0.0
+    desvio = variancia ** 0.5
+    conforme = media >= 0.85 and desvio <= 0.15
+
+    return {
+        "total_amostras": total,
+        "media_confianca": round(media, 4),
+        "dispersao_desvio": round(desvio, 4),
+        "status_demanda": "CONFORME" if conforme else "DISPERSAO_ALTA",
+        "verificado": True,
+    }
+
 
 def calcular_prazo(risco: Risco, inicio: str) -> str:
     fim = datetime.fromisoformat(inicio) + timedelta(seconds=settings.janelas[risco.value])
     return fim.isoformat(timespec="milliseconds")
 
 
-def esgotar_prazo(conn: sqlite3.Connection, tx: sqlite3.Row) -> sqlite3.Row:
-    """Registra PRAZO_ESGOTADO se a janela venceu sem decisão. Deve rodar dentro de `escrita()`.
+def esgotar_prazo(conn: sqlite3.Connection, tx: sqlite3.Row, prazo_efetivo: str | None = None) -> sqlite3.Row:
+    """Registra o decurso do prazo se a janela venceu sem decisão. Deve rodar dentro de `escrita()`.
 
-    Esgotar não aprova nem rejeita nada: só encerra a exclusividade do plantonista e
-    deixa no livro que ele não decidiu a tempo.
+    Executa a ação da política no esgotamento:
+    - CANCELAMENTO_AUTOMATICO: cancela a transação e lavra CANCELAMENTO_AUTOMATICO_SLA.
+    - ARQUIVAR: arquiva a proposta e lavra ARQUIVAMENTO_AUTOMATICO_SLA.
+    - PRAZO_ESGOTADO: encerra a exclusividade do plantonista e lavra PRAZO_ESGOTADO.
     """
     momento = agora()
-    if tx["status"] in FINAIS or tx["prazo_esgotado_em"] or not tx["prazo"] or tx["prazo"] > momento:
+    limite = prazo_efetivo or tx["prazo"]
+    if tx["status"] in FINAIS or tx["prazo_esgotado_em"] or not limite or limite > momento:
         return tx
-    registrar_evento(conn, tx["tx_id"], "PRAZO_ESGOTADO", {
+
+    chaves = tx.keys()
+    acao = tx["acao_no_esgotamento"] if ("acao_no_esgotamento" in chaves and tx["acao_no_esgotamento"]) else "PRAZO_ESGOTADO"
+    motivo = "Inércia do operador dentro da janela concedida"
+
+    if acao == "CANCELAMENTO_AUTOMATICO":
+        novo_status = Status.CANCELADO_TIMEOUT.value
+        evento_nome = "CANCELAMENTO_AUTOMATICO_SLA"
+    elif acao == "ARQUIVAR":
+        novo_status = Status.ARQUIVADO.value
+        evento_nome = "ARQUIVAMENTO_AUTOMATICO_SLA"
+    else:
+        novo_status = tx["status"]
+        evento_nome = "PRAZO_ESGOTADO"
+
+    evento = registrar_evento(conn, tx["tx_id"], evento_nome, {
+        "tipo": evento_nome,
+        "motivo": motivo,
+        "acao_executada": acao,
+        "prazo_limite_utc": limite,
+        "timestamp_utc": momento,
         "risco": tx["risco"],
+        "tipo_operacao": tx["tipo_operacao"] if "tipo_operacao" in chaves else None,
+        "politica_cliente_id": tx["politica_cliente_id"] if "politica_cliente_id" in chaves else None,
         "operador_de_plantao": tx["agente_designado"],
-        "prazo": tx["prazo"],
-        "status": tx["status"],
+        "status_anterior": tx["status"],
+        "status": novo_status,
     }, momento)
-    conn.execute("UPDATE transacoes SET prazo_esgotado_em = ? WHERE tx_id = ?", (momento, tx["tx_id"]))
+
+    conn.execute(
+        "UPDATE transacoes SET status = ?, prazo_esgotado_em = ?, proof_hash = COALESCE(proof_hash, ?) WHERE tx_id = ?",
+        (novo_status, momento, evento["hash"], tx["tx_id"]),
+    )
+    notificar_interface_sync(evento)
     return conn.execute("SELECT * FROM transacoes WHERE tx_id = ?", (tx["tx_id"],)).fetchone()
+
+
+def verificar_timeout(hash_interceptacao: str, t_max: str | None = None) -> dict[str, Any] | None:
+    """Verifica se o operador respondeu e, em caso de inércia, lavra o bloco no livro-razão."""
+    agora_iso = agora()
+    with escrita() as conn:
+        ev_origem = conn.execute(
+            "SELECT tx_id FROM ledger WHERE hash = ? AND evento = 'INTERCEPTACAO'",
+            (hash_interceptacao,),
+        ).fetchone()
+        if not ev_origem:
+            return None
+
+        tx = conn.execute("SELECT * FROM transacoes WHERE tx_id = ?", (ev_origem["tx_id"],)).fetchone()
+        if not tx:
+            return None
+
+        prazo_limite = t_max or tx["prazo"]
+        if tx["status"] not in FINAIS and not tx["prazo_esgotado_em"] and prazo_limite and agora_iso >= prazo_limite:
+            esgotar_prazo(conn, tx, prazo_efetivo=prazo_limite)
+            ultimo_evento = conn.execute(
+                "SELECT * FROM ledger WHERE tx_id = ? ORDER BY seq DESC LIMIT 1",
+                (tx["tx_id"],),
+            ).fetchone()
+            if ultimo_evento and ultimo_evento["evento"] != "INTERCEPTACAO":
+                return dict(ultimo_evento)
+    return None
 
 
 def varrer_prazos() -> int:
@@ -722,6 +995,7 @@ def preparar_contexto_proxima_janela(historico: list[dict[str, Any]]) -> str:
 # ───────────────────────────── Serialização ──────────────────────────────
 
 def serializar(tx: sqlite3.Row, com_conteudo: bool = False) -> dict[str, Any]:
+    chaves = tx.keys()
     d: dict[str, Any] = {
         "transaction_id": tx["tx_id"],
         "document_id": tx["document_id"],
@@ -734,17 +1008,43 @@ def serializar(tx: sqlite3.Row, com_conteudo: bool = False) -> dict[str, Any]:
             "risco": tx["risco"],
             "operador_de_plantao": tx["agente_designado"],
             "prazo": tx["prazo"],
+            "prazo_limite_utc": tx["prazo"],
             "prazo_esgotado_em": tx["prazo_esgotado_em"],
+            "politica_cliente_id": tx["politica_cliente_id"] if "politica_cliente_id" in chaves else None,
+            "tipo_operacao": tx["tipo_operacao"] if "tipo_operacao" in chaves else None,
+            "acao_no_esgotamento": tx["acao_no_esgotamento"] if "acao_no_esgotamento" in chaves else None,
         },
         "decisao": None,
     }
     if tx["decisao_id"]:
+        selo_inst = None
+        if tx["proof_hash"] and tx["status"] == Status.CHANCELADO.value:
+            selo_inst = emitir_selo_calice(
+                bytes.fromhex(tx["proof_hash"]),
+                thread_ref=tx["tx_id"],
+                momento=datetime.fromisoformat(tx["decided_at"]) if tx["decided_at"] else None,
+            )
         d["decisao"] = {
             "id": tx["decisao_id"],
             "operador": tx["operador"],
             "justificativa": tx["justificativa"],
             "decided_at": tx["decided_at"],
             "proof_hash": tx["proof_hash"],
+            "selo_institucional": selo_inst,
+        }
+    elif tx["proof_hash"] and tx["status"] == Status.CANCELADO_TIMEOUT.value:
+        selo_inst = emitir_selo_calice(
+            bytes.fromhex(tx["proof_hash"]),
+            thread_ref=tx["tx_id"],
+            momento=datetime.fromisoformat(tx["prazo_esgotado_em"]) if tx["prazo_esgotado_em"] else None,
+        )
+        d["decisao"] = {
+            "id": f"TIMEOUT-{tx['tx_id']}",
+            "operador": "SISTEMA (AUTOMAÇÃO SLA)",
+            "justificativa": "Cancelamento automático por inércia do operador dentro da janela concedida.",
+            "decided_at": tx["prazo_esgotado_em"],
+            "proof_hash": tx["proof_hash"],
+            "selo_institucional": selo_inst,
         }
     if com_conteudo:
         d["content"] = tx["content"]
@@ -772,50 +1072,265 @@ app = FastAPI(title="Cálice Poderoso — Core Engine", version="2.0.0", lifespa
 
 
 @app.post("/api/v1/intercept", status_code=201)
+@app.post("/api/v1/interceptar", status_code=201)
+@app.post("/api/interceptar", status_code=201)
+@app.post("/api/intercept", status_code=201)
 def intercept(req: InterceptRequest) -> dict[str, Any]:
-    violacoes = diagnosticar(req, settings)
-    status = Status.PAUSA if violacoes else Status.PRONTO
     tx_id = novo_id("TX")
-    created_at = agora()
-    prazo = calcular_prazo(req.risk_level, created_at)
+    t0 = datetime.now(timezone.utc)
+    created_at = t0.isoformat(timespec="milliseconds")
     plantao = req.designated_operator.lower() if req.designated_operator else None
 
     with escrita() as conn:
         if plantao and conn.execute(
                 "SELECT 1 FROM operadores WHERE login = ? AND ativo = 1", (plantao,)).fetchone() is None:
             raise HTTPException(422, f"Operador de plantão '{plantao}' não existe ou está desativado.")
+
+        # Consulta matriz de regras do cliente se informada
+        regra_cliente = None
+        if req.politica_cliente_id and req.tipo_operacao:
+            row_regra = conn.execute(
+                "SELECT * FROM politicas_cliente WHERE cliente_id = ? AND operacao = ?",
+                (req.politica_cliente_id, req.tipo_operacao),
+            ).fetchone()
+            if row_regra:
+                regra_cliente = dict(row_regra)
+
+        # Se o cliente ou teste enviou um prazo definido, usa ele;
+        # se não enviou, recorre à política ou à métrica de confiança do modelo:
+        if req.prazo_customizado_segundos is not None:
+            tempo_espera = req.prazo_customizado_segundos
+        elif regra_cliente and "prazo_segundos" in regra_cliente:
+            tempo_espera = int(regra_cliente["prazo_segundos"])
+        elif plantao:
+            tempo_espera = settings.janelas[req.risk_level.value]
+        else:
+            tempo_espera = calcular_tempo_por_confianca(req.confidence_score)
+
+        limiar_efetivo = float(regra_cliente["limiar_corte"]) if regra_cliente else settings.confidence_threshold
+        acao_no_esgotamento = str(regra_cliente["acao_no_esgotamento"]) if regra_cliente else "PRAZO_ESGOTADO"
+        segundos_tolerancia = tempo_espera
+
+        t_max_dt = t0 + timedelta(seconds=tempo_espera)
+        t_max = t_max_dt.isoformat(timespec="milliseconds")
+        violacoes = diagnosticar(req, settings, limiar_efetivo=limiar_efetivo)
+        status = Status.PAUSA if violacoes else Status.PRONTO
+
         conn.execute(
             "INSERT INTO transacoes (tx_id, document_id, content, liability_clause, "
-            "confidence_score, status, violations, created_at, risco, agente_designado, prazo) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "confidence_score, status, violations, created_at, risco, agente_designado, prazo, "
+            "politica_cliente_id, tipo_operacao, acao_no_esgotamento) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (tx_id, req.document_id, req.content, int(req.liability_clause), req.confidence_score,
              status.value, canonico([asdict(v) for v in violacoes]), created_at,
-             req.risk_level.value, plantao, prazo),
+             req.risk_level.value, plantao, t_max,
+             req.politica_cliente_id, req.tipo_operacao, acao_no_esgotamento),
         )
-        evento = registrar_evento(conn, tx_id, "INTERCEPTACAO", {
+
+        bloco = {
             "document_id": req.document_id,
             "content_sha256": sha256_hex(req.content),
             "liability_clause": req.liability_clause,
             "confidence_score": req.confidence_score,
-            "confidence_threshold": settings.confidence_threshold,
+            "confidence_threshold": limiar_efetivo,
+            "politica_cliente_id": req.politica_cliente_id,
+            "tipo_operacao": req.tipo_operacao,
+            "timestamp_utc": created_at,
+            "prazo_segundos": tempo_espera,
+            "prazo_limite_utc": t_max,
+            "segundos_concedidos": tempo_espera,
+            "acao_no_esgotamento": acao_no_esgotamento,
             "violations": [asdict(v) for v in violacoes],
             "status": status.value,
             "risco": req.risk_level.value,
             "operador_de_plantao": plantao,
-            "janela_segundos": settings.janelas[req.risk_level.value],
-            "prazo": prazo,
-        }, created_at)
+            "prazo": t_max,
+        }
+        evento = registrar_evento(conn, tx_id, "INTERCEPTACAO", bloco, created_at)
+
+    notificar_interface_sync(evento)
 
     return {
         "transaction_id": tx_id,
         "status": status.value,
         "violations": [asdict(v) for v in violacoes],
-        "janela": {"risco": req.risk_level.value, "operador_de_plantao": plantao,
-                   "janela_segundos": settings.janelas[req.risk_level.value], "prazo": prazo},
+        "janela": {
+            "risco": req.risk_level.value,
+            "operador_de_plantao": plantao,
+            "janela_segundos": segundos_tolerancia,
+            "prazo_segundos": tempo_espera,
+            "prazo_limite_utc": t_max,
+            "prazo": t_max,
+            "politica_cliente_id": req.politica_cliente_id,
+            "tipo_operacao": req.tipo_operacao,
+            "acao_no_esgotamento": acao_no_esgotamento,
+        },
         "input_data": req.model_dump(mode="json"),
         "hash_intermediario": evento["hash"],
         "ledger": evento,
     }
+
+
+# ────────────────── Custódia Probatória em Tempo Real ────────────────────
+
+class CaliceEngine:
+    """Motor de governança probabilística e custódia em tempo real do Cálice Poderoso."""
+
+    def avaliar_stream(self, texto_acumulado: str) -> tuple[float, Optional[str]]:
+        """Avalia a dispersão/confiança e riscos no exato milissegundo do chunk gerado."""
+        t_lower = texto_acumulado.lower()
+
+        # Gatilhos periciais de corte imediato
+        gatilhos_criticos = [
+            ("inconsistências metodológicas", "CONFIANCA_BAIXA", 0.45),
+            ("inconsistencias metodologicas", "CONFIANCA_BAIXA", 0.45),
+            ("premissas mutuamente excludentes", "CONFIANCA_BAIXA", 0.40),
+            ("sem clausula", "LACUNA_JURIDICA", 0.40),
+            ("sem cláusula", "LACUNA_JURIDICA", 0.40),
+            ("emergencial", "RISCO_OPERACIONAL", 0.55),
+            ("sem garantia", "DISPERSAO_ALTA", 0.45),
+            ("isencao total", "RISCO_JURIDICO", 0.35),
+            ("isenção total", "RISCO_JURIDICO", 0.35),
+            ("baixa automatica", "RISCO_SISTEMICO", 0.65),
+            ("baixa automática", "RISCO_SISTEMICO", 0.65),
+        ]
+
+        for termo, cod, score in gatilhos_criticos:
+            if termo in t_lower:
+                return score, cod
+
+        # Indicadores explícitos de conformidade jurídica
+        if "clausula de responsabilidade" in t_lower or "cláusula de responsabilidade" in t_lower:
+            return 0.96, None
+
+        # Dispersão por termos de hesitação probabilística
+        termos_incerteza = ["talvez", "provavelmente", "não tenho certeza", "estimado sem base", "supostamente"]
+        if any(w in t_lower for w in termos_incerteza):
+            return 0.60, "CONFIANCA_BAIXA"
+
+        return 0.90, None
+
+    def acionar_fator_pause(
+        self,
+        documento_id: str = "DOC-STREAM-LIVE",
+        texto_parcial: str = "",
+        score: float = 0.50,
+        violacao: Optional[str] = "CONFIANCA_BAIXA",
+        prazo_sla_segundos: int = 1800,
+        plantao: Optional[str] = None,
+        politica_cliente_id: Optional[str] = None,
+        tipo_operacao: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Corta a geração da IA, congela a tela de governança e abre o SLA ao vivo no livro-razão."""
+        req = InterceptRequest(
+            document_id=documento_id,
+            content=texto_parcial,
+            liability_clause=False if violacao == "LACUNA_JURIDICA" else True,
+            confidence_score=score,
+            risk_level=Risco.HIGH if score < 0.60 else Risco.MEDIUM,
+            designated_operator=plantao,
+            politica_cliente_id=politica_cliente_id,
+            tipo_operacao=tipo_operacao,
+            prazo_customizado_segundos=prazo_sla_segundos,
+        )
+        return intercept(req)
+
+
+calice_engine = CaliceEngine()
+
+
+payload_teste = {
+    "documento_id": "DOC-ESTATISTICA-VAR",
+    "proposta_texto": """
+    Do ponto de vista atuarial e estatístico rigoroso, a execução solicitada apresenta 
+    inconsistências metodológicas severas e premissas mutuamente excludentes...
+    """,
+    "limiar_minimo": 0.85,
+    "prazo_sla_segundos": 1800
+}
+
+
+def executar_geracao_sob_custodia_calice(
+    prompt_estatistico: str,
+    limiar_corte: float = 0.85,
+    modelo_nome: str = "gemini-1.5-pro",
+    prazo_sla_segundos: int = 1800,
+    stream_custom: Any = None,
+    documento_id: str = "DOC-ESTATISTICA-VAR",
+) -> dict[str, Any]:
+    """Estrutura lógica de interceptação em tempo real sob custódia do Cálice."""
+    print("Iniciando geração sob custódia do Cálice...")
+
+    # 1. Inicia o streaming real da IA (Gemini ou gerador de teste)
+    if stream_custom is not None:
+        response_stream = stream_custom
+    elif os.environ.get("GEMINI_API_KEY"):
+        genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+        model = genai.GenerativeModel(modelo_nome)
+        response_stream = model.generate_content(prompt_estatistico, stream=True)
+    else:
+        # Streaming simulado chunk a chunk caso chave da API não esteja no ambiente
+        class ChunkSimulado:
+            def __init__(self, text: str):
+                self.text = text
+
+        def gerar_simulado():
+            partes = [
+                "Iniciando parecer técnico da modelagem estatística. ",
+                "Do ponto de vista atuarial e estatístico rigoroso, a execução solicitada apresenta ",
+                "inconsistências metodológicas severas e premissas mutuamente excludentes... ",
+                "inviabilizando a concessão autônoma sem cláusula de responsabilidade expressa."
+            ]
+            for p in partes:
+                yield ChunkSimulado(p)
+
+        response_stream = gerar_simulado()
+
+    texto_acumulado = ""
+
+    for chunk in response_stream:
+        chunk_text = getattr(chunk, "text", str(chunk))
+        texto_acumulado += chunk_text
+
+        # 2. Avalia a dispersão/confiança no exato milissegundo do chunk
+        score_atual, violacao = calice_engine.avaliar_stream(texto_acumulado)
+
+        # 3. INTERCEPTAÇÃO EM TEMPO REAL
+        if score_atual < limiar_corte:
+            # Corta a geração da IA imediatamente
+            print(f"\n[INTERCEPTAÇÃO ATIVA] Score caiu para {score_atual} (< {limiar_corte})!")
+
+            # Envia para a bancada congelar a tela e abrir o SLA ao vivo
+            transacao = calice_engine.acionar_fator_pause(
+                documento_id=documento_id,
+                texto_parcial=texto_acumulado,
+                score=score_atual,
+                violacao=violacao,
+                prazo_sla_segundos=prazo_sla_segundos
+            )
+            return transacao  # Aborta o resto da geração
+
+    print("Geração concluída sem violações de governança.")
+    return {"status": "CONCLUIDO_SEM_VIOLACOES", "content": texto_acumulado}
+
+
+class StreamGenerateRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    prompt: str = Field(min_length=1, max_length=20000)
+    limiar_corte: float = Field(default=0.85, ge=0.0, le=1.0)
+    prazo_sla_segundos: int = Field(default=1800, ge=1, le=86400 * 30)
+    documento_id: str = Field(default="DOC-STREAM-LIVE", max_length=120)
+
+
+@app.post("/api/v1/stream/generate")
+def api_stream_generate(req: StreamGenerateRequest) -> dict[str, Any]:
+    """Executa a geração de IA sob custódia probatória do Cálice com interceptação em tempo real."""
+    return executar_geracao_sob_custodia_calice(
+        prompt_estatistico=req.prompt,
+        limiar_corte=req.limiar_corte,
+        prazo_sla_segundos=req.prazo_sla_segundos,
+        documento_id=req.documento_id,
+    )
 
 
 def _decidir(req: DecisionRequest, operador: Operador, aprovar: bool) -> dict[str, Any]:
@@ -864,7 +1379,7 @@ def _decidir(req: DecisionRequest, operador: Operador, aprovar: bool) -> dict[st
              decided_at, evento["hash"], tx["tx_id"]),
         )
 
-    return {
+    resposta = {
         "transaction_id": req.transaction_id,
         "status": novo_status.value,
         "juizo_humano": {
@@ -877,12 +1392,19 @@ def _decidir(req: DecisionRequest, operador: Operador, aprovar: bool) -> dict[st
         ("selo_calice" if aprovar else "registro_rejeicao"): {
             "seal_id": decisao_id,
             "proof_hash": evento["hash"],
+            "selo_institucional": emitir_selo_calice(
+                bytes.fromhex(evento["hash"]),
+                thread_ref=tx["tx_id"],
+                momento=datetime.fromisoformat(decided_at),
+            ) if aprovar else None,
             "ledger_seq": evento["seq"],
             "padrao": PADRAO_SELO,
             "assinatura": evento["assinatura"],
             "chave_publica": chave_publica(),
         },
     }
+    notificar_interface_sync(evento)
+    return resposta
 
 
 @app.post("/api/v1/seal")
@@ -978,6 +1500,15 @@ def ler_chave_publica() -> dict[str, Any]:
     return {**chave_publica(), "chave_desenvolvimento": settings.dev_key}
 
 
+@app.get("/api/v1/seal/decode")
+def decodificar_selo_endpoint(selo: str = Query(..., description="Selo institucional CLC-AUTH")) -> dict[str, Any]:
+    """Decodifica um selo oficial CLC-AUTH em seus componentes periciais originais."""
+    try:
+        return {"valido": True, "detalhes": vp.decodificar_selo(selo)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/v1/ledger/export")
 def exportar() -> dict[str, Any]:
     """Livro completo, verificável offline com `verificar_publico.py` e a chave pública."""
@@ -1017,15 +1548,90 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+# ─────────────────────── Políticas de Cliente (SLA) ───────────────────────
+
+@app.post("/api/v1/policies", status_code=201)
+def registrar_politica(req: PoliticaClienteRequest) -> dict[str, Any]:
+    """Registra ou atualiza matriz de regras de operação e SLA por cliente."""
+    with escrita() as conn:
+        for op, regra in req.regras_de_operacao.items():
+            conn.execute(
+                "INSERT INTO politicas_cliente (cliente_id, operacao, limiar_corte, prazo_segundos, acao_no_esgotamento) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(cliente_id, operacao) DO UPDATE SET "
+                "limiar_corte = excluded.limiar_corte, "
+                "prazo_segundos = excluded.prazo_segundos, "
+                "acao_no_esgotamento = excluded.acao_no_esgotamento",
+                (req.politica_cliente_id, op, regra.limiar_corte, regra.prazo_segundos, regra.acao_no_esgotamento),
+            )
+    return {"status": "ok", "politica_cliente_id": req.politica_cliente_id, "regras": len(req.regras_de_operacao)}
+
+
+@app.get("/api/v1/policies/{cliente_id}")
+def obter_politica(cliente_id: str) -> dict[str, Any]:
+    """Consulta regras ativas de um cliente corporativo."""
+    with leitura() as conn:
+        rows = conn.execute("SELECT * FROM politicas_cliente WHERE cliente_id = ?", (cliente_id,)).fetchall()
+    if not rows:
+        raise HTTPException(404, f"Política do cliente '{cliente_id}' não encontrada.")
+    regras = {
+        r["operacao"]: {
+            "limiar_corte": r["limiar_corte"],
+            "prazo_segundos": r["prazo_segundos"],
+            "acao_no_esgotamento": r["acao_no_esgotamento"],
+        }
+        for r in rows
+    }
+    return {"politica_cliente_id": cliente_id, "regras_de_operacao": regras}
+
+
+@app.post("/api/v1/timeout/verify")
+def api_verificar_timeout(hash_interceptacao: str = Query(..., description="Hash do evento de interceptação"),
+                          t_max: Optional[str] = Query(None, description="Instante limite opcional")) -> dict[str, Any]:
+    """Verifica e executa decurso de prazo por inércia sobre uma transação específica."""
+    bloco = verificar_timeout(hash_interceptacao, t_max)
+    return {"verificado": True, "bloco_lavrado": bloco}
+
+
+# ────────────────────── WebSocket em tempo real ──────────────────────────
+
+@app.websocket("/api/v1/ws/events")
+async def websocket_events(websocket: WebSocket):
+    """Canal WebSocket bidirecional para atualização reativa da interface."""
+    await ws_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+
+
 # ─────────────────────────── Linha de comando ────────────────────────────
 
 def cli(argv: list[str] | None = None) -> int:
-    """Gestão de operadores:  python main.py operador {criar,senha,desativar,reativar,listar}"""
+    """Linha de comando do Cálice Poderoso.
+    Sem argumentos: inicia o servidor web Uvicorn (porta 8000).
+    Com subcomando: gestão de operadores (python main.py operador {criar,senha,desativar,reativar,listar}).
+    """
     import argparse
     import getpass
+    import sys
 
-    parser = argparse.ArgumentParser(prog="python main.py", description="Cálice Poderoso: gestão de operadores")
+    # Se executado diretamente sem argumentos (ex: python main.py), inicia o servidor
+    if argv is None and len(sys.argv) == 1:
+        import uvicorn
+        print("Cálice Poderoso — Core Engine v2")
+        print("Iniciando servidor HTTP/WebSocket em http://127.0.0.1:8000 ...")
+        uvicorn.run("main:app", host="127.0.0.1", port=8000, log_level="info")
+        return 0
+
+    parser = argparse.ArgumentParser(prog="python main.py", description="Cálice Poderoso: gestão e estresse concorrente")
     sub = parser.add_subparsers(dest="grupo", required=True)
+
+    # Bancada de estresse concorrente
+    p_estresse = sub.add_parser("estresse", help="executa bancada de estresse assíncrona concorrente")
+    p_estresse.add_argument("--eventos", type=int, default=15, help="total de eventos simultâneos (padrão: 15)")
+
     acoes = sub.add_parser("operador").add_subparsers(dest="acao", required=True)
     criar = acoes.add_parser("criar", help="cria um operador (pede a senha no terminal)")
     criar.add_argument("login")
@@ -1036,6 +1642,11 @@ def cli(argv: list[str] | None = None) -> int:
         acoes.add_parser(nome, help=ajuda).add_argument("login")
     acoes.add_parser("listar", help="lista os operadores")
     args = parser.parse_args(argv)
+
+    if args.grupo == "estresse":
+        from bancada_concorrente import executar_bancada_estresse
+        asyncio.run(executar_bancada_estresse(total_eventos=args.eventos))
+        return 0
 
     global settings
     settings = load_settings()

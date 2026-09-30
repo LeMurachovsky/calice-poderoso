@@ -2,6 +2,8 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic>=2.6
 cryptography>=42
+base58>=2.1.1
+google-generativeai>=0.8.0
 
 # testes
 pytest>=8

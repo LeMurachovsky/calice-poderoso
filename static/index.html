@@ -315,6 +315,43 @@
   .aviso.saindo { opacity: 0; transition: opacity .25s; }
   @keyframes surgir { from { opacity: 0; transform: translateY(6px); } }
 
+  /* ── Painel de Janela de Resposta & Cronômetro SLA ── */
+  .bloco--janela {
+    background: var(--folha-2);
+    border-left: 4px solid var(--carimbo);
+    border-radius: 6px;
+    margin: 4px 0 16px;
+    padding: 16px 20px;
+  }
+  .janela-cabeca {
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;
+  }
+  .janela-meta { display: grid; gap: 4px; }
+  .janela-titulo {
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--grafite);
+  }
+  .janela-detalhe {
+    font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .chip-politica, .chip-acao {
+    padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; border: 1px solid var(--regua);
+    background: var(--folha); color: var(--grafite);
+  }
+  .chip-politica code, .chip-acao code { font-weight: 600; color: var(--tinta); }
+  .crono-card {
+    display: inline-flex; align-items: center; gap: 10px; padding: 7px 14px; border-radius: 6px;
+    border: 1px solid var(--regua-forte); background: var(--folha); box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  }
+  .crono-icone { font-size: 18px; line-height: 1; }
+  .crono-info { display: grid; gap: 1px; }
+  .crono-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--grafite); font-weight: 600; }
+  .crono-display {
+    font-family: var(--mono); font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--pronto);
+  }
+  .crono-display.crono-alerta { color: var(--pausa); animation: pulso-crono 1.4s infinite; }
+  .crono-display.crono-expirado { color: var(--rejeicao); }
+  @keyframes pulso-crono { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
   @media (max-width: 900px) {
     .mesa { grid-template-columns: 1fr; }
     .livro { position: static; max-height: none; }
@@ -381,6 +418,20 @@
           <label class="campo"><span class="rotulo">Confiança do modelo</span>
             <span class="sim-linha"><input id="sim-conf" type="range" min="0" max="1" step="0.01" value="0.9"><output id="sim-conf-v" for="sim-conf">0,90</output></span>
           </label>
+          <label class="campo">
+            <span class="rotulo">Definir Janela de Resposta (segundos/minutos)</span>
+            <div style="display:grid;grid-template-columns:1fr auto;gap:8px;">
+              <select id="sim-janela-seletor" style="padding:8px 10px;border-radius:6px;border:1px solid var(--regua-forte);background:var(--folha);color:var(--tinta);font:inherit;">
+                <option value="60">1 minuto (60s) — Teste Rápido</option>
+                <option value="120" selected>2 minutos (120s) — PIX / Operação Crítica</option>
+                <option value="300">5 minutos (300s) — Consulta Geral</option>
+                <option value="600">10 minutos (600s)</option>
+                <option value="1800">30 minutos (1800s) — Contratos / Jurídico</option>
+                <option value="custom">Customizado...</option>
+              </select>
+              <input id="sim-janela-custom" type="number" min="5" max="86400" placeholder="Segundos" style="display:none;width:105px;padding:8px 10px;border-radius:6px;border:1px solid var(--regua-forte);background:var(--folha);color:var(--tinta);font:inherit;">
+            </div>
+          </label>
           <label class="sim-check"><input id="sim-clausula" type="checkbox" checked> Contém cláusula de responsabilidade</label>
           <button type="submit" class="btn btn--largo">Enviar para interceptação</button>
         </form>
@@ -415,11 +466,21 @@
     PRONTO_PARA_CHANCELA: { curto: "Pronta", longo: "Pronta para chancela", classe: "pronto" },
     CHANCELADO_E_CONCLUIDO: { curto: "Chancelada", longo: "Chancelada", classe: "chancelado" },
     REJEITADO: { curto: "Rejeitada", longo: "Rejeitada", classe: "rejeitado" },
+    CANCELADO_POR_TIMEOUT: { curto: "Cancelada (SLA)", longo: "Cancelada por decurso de prazo", classe: "rejeitado" },
+    ARQUIVADO: { curto: "Arquivada", longo: "Arquivada por inércia", classe: "pausa" },
   };
   const PENDENTES = new Set(["FATOR_DE_PAUSA_ATIVADO", "PRONTO_PARA_CHANCELA"]);
   const NOMES = { LACUNA_JURIDICA: "Lacuna jurídica", CONFIANCA_BAIXA: "Confiança insuficiente" };
   const SEVERIDADE = { CRITICA: "crítica", ALTA: "alta", MEDIA: "média" };
-  const EVENTOS = { INTERCEPTACAO: "Interceptação", CHANCELA: "Chancela", REJEICAO: "Rejeição" };
+  const EVENTOS = {
+    INTERCEPTACAO: "Interceptação",
+    CHANCELA: "Chancela",
+    REJEICAO: "Rejeição",
+    PRAZO_ESGOTADO: "Prazo Esgotado",
+    CANCELAMENTO_AUTOMATICO_SLA: "Cancelamento Automático (SLA)",
+    ARQUIVAMENTO_AUTOMATICO_SLA: "Arquivamento Automático (SLA)",
+    SINCRONIZACAO: "Sincronização",
+  };
   const MIN_JUSTIFICATIVA = 15;
   // A sessão fica só nesta aba (sessionStorage): fechar a aba encerra o acesso no navegador.
   const lerSessao = () => { try { return JSON.parse(sessionStorage.getItem("calice.sessao")); } catch { return null; } };
@@ -542,7 +603,7 @@
     const r = estado.resumo;
     const contagem = {
       pendentes: (r.FATOR_DE_PAUSA_ATIVADO || 0) + (r.PRONTO_PARA_CHANCELA || 0),
-      concluidas: (r.CHANCELADO_E_CONCLUIDO || 0) + (r.REJEITADO || 0),
+      concluidas: (r.CHANCELADO_E_CONCLUIDO || 0) + (r.REJEITADO || 0) + (r.CANCELADO_POR_TIMEOUT || 0) + (r.ARQUIVADO || 0),
       todas: r.TOTAL || 0,
     };
     document.querySelectorAll(".aba").forEach((b) => {
@@ -638,13 +699,43 @@
         </dl>
       </section>
 
+      <section class="bloco bloco--janela">
+        <div class="janela-cabeca">
+          <div class="janela-meta">
+            <span class="janela-titulo">Janela de Resposta & Custódia de SLA</span>
+            <div class="janela-detalhe">
+              <span>Prazo Concedido: <b>${formatarDuracao(t.janela?.janela_segundos || t.janela?.prazo_segundos || 1800)}</b></span>
+              ${t.janela?.politica_cliente_id ? `<span class="chip-politica">Política: <code>${esc(t.janela.politica_cliente_id)}</code> / ${esc(t.janela.tipo_operacao || 'GERAL')}</span>` : ''}
+              ${t.janela?.acao_no_esgotamento ? `<span class="chip-acao">Ação SLA: <code>${esc(t.janela.acao_no_esgotamento)}</code></span>` : ''}
+              ${t.janela?.operador_de_plantao ? `<span class="chip-politica">Plantão: <code>${esc(t.janela.operador_de_plantao)}</code></span>` : ''}
+            </div>
+          </div>
+          <div class="crono-card" id="crono-card-topo">
+            <span class="crono-icone">⏳</span>
+            <div class="crono-info">
+              <span class="crono-label">Janela Limite (T_max)</span>
+              <span class="crono-display" id="crono-topo-valor">Calculando...</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="bloco">
         <h3>Diagnóstico</h3>
         ${diagnosticoHTML(t, pendente)}
       </section>
 
       <section class="bloco">
-        <h3>Juízo humano</h3>
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px;">
+          <h3 style="margin:0;">Juízo humano</h3>
+          <div class="crono-card" id="crono-card-juizo">
+            <span class="crono-icone">⏱️</span>
+            <div class="crono-info">
+              <span class="crono-label">Contagem Decrescente em Tempo Real</span>
+              <span class="crono-display" id="crono-juizo-valor">Aguardando...</span>
+            </div>
+          </div>
+        </div>
         ${pendente ? formularioHTML(t) : registroHTML(t)}
       </section>
 
@@ -662,6 +753,7 @@
       </section>
     </article>`;
     if (pendente) ligarFormulario(t);
+    iniciarCronometro(t);
   }
 
   function diagnosticoHTML(t, pendente) {
@@ -823,6 +915,9 @@
         <div><dt>${aprovado ? "Chancelada em" : "Rejeitada em"}</dt><dd>${fmtData.format(new Date(d.decided_at))}</dd></div>
         <div><dt>Padrão</dt><dd><code>${esc(estado.padrao)}</code></dd></div>
         <div class="largo"><dt>Justificativa</dt><dd class="justificativa">${esc(d.justificativa)}</dd></div>
+        ${d.selo_institucional ? `<div class="largo"><dt>Selo Institucional Oficial (CLC-AUTH)</dt>
+          <dd><code class="hash" style="color:var(--carimbo);font-weight:600;word-break:break-all;">${esc(d.selo_institucional)}</code>
+          <button type="button" class="copiar" data-copiar="${esc(d.selo_institucional)}">Copiar selo oficial</button></dd></div>` : ""}
         <div class="largo"><dt>Prova criptográfica</dt><dd><code class="hash">${agrupar(d.proof_hash)}</code>
           <button type="button" class="copiar" data-copiar="${esc(d.proof_hash)}">Copiar prova</button></dd></div>
       </dl>
@@ -897,6 +992,88 @@
     }
   }
 
+  // ── Formatação de Duração & Cronômetro em Tempo Real ──
+  function formatarDuracao(seg) {
+    seg = Number(seg) || 1800;
+    if (seg >= 3600) {
+      const h = Math.floor(seg / 3600);
+      const m = Math.floor((seg % 3600) / 60);
+      return m > 0 ? `${seg}s (${h}h ${m}m)` : `${seg}s (${h}h)`;
+    }
+    if (seg >= 60) {
+      const m = Math.floor(seg / 60);
+      const s = seg % 60;
+      return s > 0 ? `${seg}s (${m}m ${s}s)` : `${seg}s (${m}m)`;
+    }
+    return `${seg}s`;
+  }
+
+  let timerCronometro = null;
+  function iniciarCronometro(t) {
+    if (timerCronometro) {
+      clearInterval(timerCronometro);
+      timerCronometro = null;
+    }
+    const elTopo = $("#crono-topo-valor");
+    const elJuizo = $("#crono-juizo-valor");
+    if (!elTopo && !elJuizo) return;
+
+    if (!PENDENTES.has(t.status)) {
+      const finalMsg = t.status === "CANCELADO_POR_TIMEOUT" ? "00:00 (Timeout SLA)" : "Concluído";
+      if (elTopo) { elTopo.textContent = finalMsg; elTopo.className = "crono-display"; }
+      if (elJuizo) { elJuizo.textContent = finalMsg; elJuizo.className = "crono-display"; }
+      return;
+    }
+
+    const limiteIso = t.janela?.prazo_limite_utc || t.janela?.prazo;
+    if (!limiteIso) {
+      if (elTopo) elTopo.textContent = "Sem prazo fixado";
+      if (elJuizo) elJuizo.textContent = "Sem prazo fixado";
+      return;
+    }
+
+    const tMax = new Date(limiteIso).getTime();
+
+    function tick() {
+      const agora = Date.now();
+      const diff = tMax - agora;
+      if (diff <= 0) {
+        const msg = "00:00 — JANELA ESGOTADA";
+        if (elTopo) { elTopo.textContent = msg; elTopo.className = "crono-display crono-expirado"; }
+        if (elJuizo) { elJuizo.textContent = msg; elJuizo.className = "crono-display crono-expirado"; }
+        clearInterval(timerCronometro);
+        timerCronometro = null;
+        return;
+      }
+      const totalSeg = Math.floor(diff / 1000);
+      const h = Math.floor(totalSeg / 3600);
+      const m = Math.floor((totalSeg % 3600) / 60);
+      const s = totalSeg % 60;
+      let display;
+      if (h > 0) {
+        display = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+      } else {
+        display = `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+      }
+      const classe = totalSeg < 60 ? "crono-display crono-alerta" : "crono-display";
+      if (elTopo) { elTopo.textContent = `${display} restantes`; elTopo.className = classe; }
+      if (elJuizo) { elJuizo.textContent = `${display} restantes`; elJuizo.className = classe; }
+    }
+
+    tick();
+    timerCronometro = setInterval(tick, 1000);
+  }
+
+  function obterPrazoSimulador() {
+    const sel = $("#sim-janela-seletor");
+    if (!sel) return 120;
+    if (sel.value === "custom") {
+      const customVal = parseInt($("#sim-janela-custom").value, 10);
+      return (customVal && customVal > 0) ? customVal : 120;
+    }
+    return parseInt(sel.value, 10) || 120;
+  }
+
   // ── Eventos globais ────────────────────────────────
   document.addEventListener("click", async (ev) => {
     const copiar = ev.target.closest("[data-copiar]");
@@ -911,9 +1088,22 @@
     if (aba) { estado.filtro = aba.dataset.filtro; renderFila(); return; }
     const preset = ev.target.closest(".preset");
     if (preset) {
-      simular({ document_id: docAleatorio(), content: amostra(), ...PRESETS[preset.dataset.preset] });
+      simular({
+        document_id: docAleatorio(),
+        content: amostra(),
+        ...PRESETS[preset.dataset.preset],
+        prazo_customizado_segundos: obterPrazoSimulador(),
+      });
     }
   });
+
+  const selJanelaEl = $("#sim-janela-seletor");
+  if (selJanelaEl) {
+    selJanelaEl.addEventListener("change", (ev) => {
+      const customEl = $("#sim-janela-custom");
+      if (customEl) customEl.style.display = ev.target.value === "custom" ? "inline-block" : "none";
+    });
+  }
 
   $("#sim-conf").addEventListener("input", (ev) => { $("#sim-conf-v").value = num(ev.target.value); });
   $("#form-sim").addEventListener("submit", (ev) => {
@@ -923,6 +1113,7 @@
       content: $("#sim-conteudo").value.trim(),
       confidence_score: Number($("#sim-conf").value),
       liability_clause: $("#sim-clausula").checked,
+      prazo_customizado_segundos: obterPrazoSimulador(),
     });
   });
   $("#integridade").addEventListener("click", verificar);
@@ -932,6 +1123,24 @@
     raiz.dataset.theme = atual === "dark" ? "light" : "dark";
     gravarLocal("calice.tema", raiz.dataset.theme);
   });
+
+  function ligarWebSocket() {
+    try {
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new WebSocket(`${proto}//${location.host}/api/v1/ws/events`);
+      ws.onmessage = async (ev) => {
+        try {
+          const dados = JSON.parse(ev.data);
+          const evNome = EVENTOS[dados.evento || dados.tipo] || dados.evento || "Novo evento";
+          avisar(`Tempo real: ${evNome}`, "atencao");
+          await carregarFila();
+          if (estado.sel) await abrir(estado.sel);
+          verificar();
+        } catch {}
+      };
+      ws.onclose = () => setTimeout(ligarWebSocket, 4000);
+    } catch {}
+  }
 
   // ── Início ─────────────────────────────────────────
   (async function iniciar() {
@@ -943,6 +1152,7 @@
       avisar(`Não foi possível carregar a fila: ${e.message}`, "erro");
     }
     verificar();
+    ligarWebSocket();
     const primeira = estado.itens.find((i) => PENDENTES.has(i.status));
     if (primeira) await abrir(primeira.transaction_id); else renderDetalhe();
 
@@ -950,7 +1160,7 @@
       if (document.hidden || estado.ocupado) return;
       carregarFila().catch(() => {});
       verificar();
-    }, 8000);
+    }, 12000);
   })();
 })();
 </script>
