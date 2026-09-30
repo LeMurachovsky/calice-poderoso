@@ -1545,7 +1545,22 @@ def health() -> dict[str, Any]:
 
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "landing.html")
+
+
+@app.get("/console", include_in_schema=False)
+@app.get("/console.html", include_in_schema=False)
+@app.get("/app", include_in_schema=False)
+def console() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/landing", include_in_schema=False)
+@app.get("/landing.html", include_in_schema=False)
+def landing() -> FileResponse:
+    return FileResponse(STATIC_DIR / "landing.html")
+
+
 
 
 # ─────────────────────── Políticas de Cliente (SLA) ───────────────────────

@@ -1,0 +1,297 @@
+﻿<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calice Poderoso -- Governanca Humana sobre Decisoes de IA</title>
+<meta name="description" content="A primeira plataforma de custodia probatoria para IA com livro-razao criptografico duplo. Decisoes de IA so seguem com juizo humano registrado e assinado.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--indigo-950:#0f0a1e;--violet-600:#7C3AED;--violet-500:#8B5CF6;--violet-400:#A78BFA;--violet-300:#C4B5FD;--violet-700:#3b2f8a;--purple-glow:rgba(124,58,237,.35);--emerald-400:#34D399;--amber-400:#FBBF24;--slate-200:#E2E8F0;--slate-400:#94A3B8;--slate-600:#475569;--font-sans:'Inter',system-ui,sans-serif;--font-mono:'JetBrains Mono',monospace}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--indigo-950);color:#fff;font-family:var(--font-sans);-webkit-font-smoothing:antialiased;overflow-x:hidden}
+nav{position:fixed;top:0;left:0;right:0;z-index:100;display:flex;align-items:center;justify-content:space-between;padding:0 clamp(20px,5vw,80px);height:68px;background:rgba(15,10,30,.75);backdrop-filter:blur(20px);border-bottom:1px solid rgba(124,58,237,.15)}
+.nav-brand{display:flex;align-items:center;gap:12px;text-decoration:none;color:#fff}
+.logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--violet-600),var(--violet-400));border-radius:10px;display:grid;place-items:center;box-shadow:0 0 20px var(--purple-glow)}
+.logo-icon svg{width:20px;height:20px;color:#fff}
+.brand-text{font-weight:700;font-size:17px;letter-spacing:-.02em}
+.brand-tag{font-size:10px;font-weight:600;letter-spacing:.08em;color:var(--violet-400);text-transform:uppercase;display:block;margin-top:-2px}
+.nav-links{display:flex;align-items:center;gap:8px}
+.nav-link{padding:8px 16px;border-radius:8px;font-size:14px;font-weight:500;color:var(--slate-400);text-decoration:none;transition:color .2s,background .2s}
+.nav-link:hover{color:#fff;background:rgba(255,255,255,.05)}
+.nav-cta{padding:9px 20px;border-radius:8px;font-size:14px;font-weight:600;background:var(--violet-600);color:#fff;text-decoration:none;transition:all .2s;box-shadow:0 0 20px rgba(124,58,237,.4)}
+.nav-cta:hover{background:var(--violet-500);transform:translateY(-1px);box-shadow:0 4px 24px rgba(124,58,237,.5)}
+.hero{position:relative;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:100px clamp(20px,5vw,80px) 80px;overflow:hidden}
+.hero-glow{position:absolute;top:-20%;left:50%;transform:translateX(-50%);width:900px;height:600px;background:radial-gradient(ellipse,rgba(124,58,237,.25) 0%,rgba(124,58,237,.08) 45%,transparent 70%);pointer-events:none}
+.hero-grid{position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(rgba(124,58,237,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(124,58,237,.06) 1px,transparent 1px);background-size:60px 60px;mask-image:radial-gradient(ellipse 80% 80% at 50% 0%,black 30%,transparent 100%)}
+.hero-inner{position:relative;z-index:1;max-width:860px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:28px}
+.hero-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 16px;border-radius:999px;background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.3);font-size:13px;font-weight:600;color:var(--violet-400);letter-spacing:.02em}
+.hero-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--emerald-400);animation:pulse-dot 2s infinite}
+@keyframes pulse-dot{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,.4)}50%{box-shadow:0 0 0 5px rgba(52,211,153,0)}}
+.hero-title{font-size:clamp(42px,7vw,84px);font-weight:900;line-height:1.03;letter-spacing:-.04em}
+.hero-title .grad{background:linear-gradient(135deg,#fff 0%,var(--violet-400) 50%,var(--violet-300) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero-sub{font-size:clamp(16px,2vw,20px);color:var(--slate-400);max-width:600px;line-height:1.7;font-weight:400}
+.hero-sub strong{color:var(--violet-300);font-weight:600}
+.hero-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap;justify-content:center}
+.btn-p{display:inline-flex;align-items:center;gap:8px;padding:14px 28px;border-radius:10px;font-size:16px;font-weight:700;background:var(--violet-600);color:#fff;text-decoration:none;transition:all .2s;box-shadow:0 4px 24px rgba(124,58,237,.5),inset 0 1px 0 rgba(255,255,255,.1)}
+.btn-p:hover{background:var(--violet-500);transform:translateY(-2px);box-shadow:0 8px 32px rgba(124,58,237,.6)}
+.btn-s{display:inline-flex;align-items:center;gap:8px;padding:14px 28px;border-radius:10px;font-size:16px;font-weight:600;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);color:#fff;text-decoration:none;transition:all .2s;backdrop-filter:blur(8px)}
+.btn-s:hover{background:rgba(255,255,255,.09);border-color:rgba(124,58,237,.4);transform:translateY(-2px)}
+.hero-stats{display:flex;align-items:center;gap:32px;flex-wrap:wrap;justify-content:center;padding-top:12px;border-top:1px solid rgba(255,255,255,.07);width:100%}
+.stat{text-align:center}
+.stat-num{font-size:26px;font-weight:800;color:#fff;letter-spacing:-.03em}
+.stat-num span{color:var(--violet-400)}
+.stat-label{font-size:12px;color:var(--slate-400);font-weight:500;margin-top:2px}
+section{position:relative;z-index:1}
+.container{max-width:1100px;margin:0 auto;padding:0 clamp(20px,5vw,60px)}
+.section-label{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--violet-400);margin-bottom:14px}
+.section-title{font-size:clamp(28px,4vw,46px);font-weight:800;letter-spacing:-.03em;line-height:1.1}
+.section-sub{font-size:17px;color:var(--slate-400);line-height:1.7;max-width:540px;margin-top:14px}
+.problem{padding:100px 0}
+.problem-grid{display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:center;margin-top:60px}
+.problem-cards{display:grid;gap:14px}
+.problem-card{display:flex;align-items:flex-start;gap:14px;padding:20px;border-radius:12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);transition:border-color .2s}
+.problem-card:hover{border-color:rgba(124,58,237,.3)}
+.picon{width:40px;height:40px;border-radius:8px;flex:none;display:grid;place-items:center;font-size:18px}
+.picon.r{background:rgba(244,63,94,.12)}.picon.a{background:rgba(251,191,36,.12)}.picon.b{background:rgba(59,130,246,.12)}
+.problem-text h4{font-size:15px;font-weight:700;margin-bottom:4px}
+.problem-text p{font-size:14px;color:var(--slate-400);line-height:1.6}
+.sol-visual{background:linear-gradient(135deg,rgba(124,58,237,.08),rgba(124,58,237,.02));border:1px solid rgba(124,58,237,.2);border-radius:16px;padding:32px;display:grid;gap:14px}
+.flow-step{display:flex;align-items:center;gap:14px;padding:12px 14px;border-radius:10px;background:rgba(255,255,255,.03)}
+.flow-num{width:30px;height:30px;border-radius:8px;flex:none;background:var(--violet-700);display:grid;place-items:center;font-size:13px;font-weight:700;color:var(--violet-300)}
+.flow-text{font-size:13px;color:var(--slate-200)}
+.flow-arr{text-align:center;color:var(--violet-600);font-size:18px}
+.how{padding:100px 0;background:rgba(255,255,255,.01)}
+.steps-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:24px;margin-top:56px}
+.step-card{position:relative;padding:28px;border-radius:16px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);transition:all .25s;overflow:hidden}
+.step-card::before{content:'';position:absolute;inset:0;border-radius:16px;background:linear-gradient(135deg,rgba(124,58,237,.08),transparent);opacity:0;transition:opacity .25s}
+.step-card:hover{border-color:rgba(124,58,237,.35);transform:translateY(-3px)}
+.step-card:hover::before{opacity:1}
+.step-number{font-size:52px;font-weight:900;color:rgba(124,58,237,.15);line-height:1;letter-spacing:-.04em;margin-bottom:14px;font-family:var(--font-mono)}
+.step-icon{width:46px;height:46px;border-radius:12px;background:rgba(124,58,237,.15);border:1px solid rgba(124,58,237,.25);display:grid;place-items:center;margin-bottom:18px;font-size:22px}
+.step-title{font-size:18px;font-weight:700;margin-bottom:10px;letter-spacing:-.01em}
+.step-desc{font-size:14px;color:var(--slate-400);line-height:1.7}
+.step-code{margin-top:14px;padding:12px 14px;border-radius:8px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.05);font-family:var(--font-mono);font-size:12px;color:var(--violet-300);overflow-x:auto}
+.step-code .cmt{color:#4a5568}
+.features{padding:100px 0}
+.features-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;margin-top:56px}
+.feat{padding:26px;border-radius:14px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);transition:all .2s}
+.feat:hover{border-color:rgba(124,58,237,.25);background:rgba(124,58,237,.04)}
+.feat-icon{font-size:28px;margin-bottom:16px}
+.feat-title{font-size:16px;font-weight:700;margin-bottom:8px}
+.feat-desc{font-size:14px;color:var(--slate-400);line-height:1.65}
+.feat-tag{display:inline-block;margin-top:12px;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:rgba(124,58,237,.12);color:var(--violet-400);border:1px solid rgba(124,58,237,.2)}
+.tech{padding:100px 0;background:rgba(0,0,0,.2)}
+.tech-layout{display:grid;grid-template-columns:1fr 1fr;gap:60px;align-items:start;margin-top:60px}
+.terminal{background:#0d0d14;border:1px solid rgba(124,58,237,.2);border-radius:14px;overflow:hidden}
+.term-bar{display:flex;align-items:center;gap:7px;padding:12px 16px;background:rgba(255,255,255,.03);border-bottom:1px solid rgba(255,255,255,.05)}
+.tdot{width:10px;height:10px;border-radius:50%}
+.tdot.r{background:#FF5F57}.tdot.y{background:#FEBC2E}.tdot.g{background:#28C840}
+.term-title{font-size:12px;color:var(--slate-400);margin-left:8px;font-family:var(--font-mono)}
+.term-body{padding:20px;font-family:var(--font-mono);font-size:13px;line-height:1.8}
+.tc{color:#4a5568}.tk{color:#A78BFA}.ts{color:#FCD34D}.tn{color:#F9A8D4}.tb{color:#67E8F9}.tbr{color:var(--slate-400)}.tr{color:var(--emerald-400);font-weight:600}
+.endpoints{display:grid;gap:10px}
+.endpoint{display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:10px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.05)}
+.badge{font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;font-family:var(--font-mono);flex:none}
+.badge.post{background:rgba(52,211,153,.12);color:var(--emerald-400)}
+.badge.get{background:rgba(124,58,237,.12);color:var(--violet-400)}
+.ep-path{font-family:var(--font-mono);font-size:13px;color:var(--slate-200)}
+.ep-desc{font-size:12px;color:var(--slate-400);margin-left:auto}
+.trust{padding:100px 0}
+.trust-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:24px;margin-top:56px}
+.trust-card{padding:28px;border-radius:16px;text-align:center;border:1px solid rgba(255,255,255,.07);background:linear-gradient(145deg,rgba(124,58,237,.06),rgba(0,0,0,.3));transition:all .25s}
+.trust-card:hover{border-color:rgba(124,58,237,.3);transform:translateY(-3px)}
+.trust-card .icon{font-size:40px;margin-bottom:16px}
+.trust-card h3{font-size:18px;font-weight:700;margin-bottom:10px}
+.trust-card p{font-size:14px;color:var(--slate-400);line-height:1.65}
+.pbadge{margin-top:16px;display:inline-block;padding:4px 12px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.06em}
+.pbadge.g{background:rgba(16,185,129,.12);color:var(--emerald-400);border:1px solid rgba(16,185,129,.2)}
+.pbadge.v{background:rgba(124,58,237,.12);color:var(--violet-400);border:1px solid rgba(124,58,237,.2)}
+.pbadge.a{background:rgba(251,191,36,.1);color:var(--amber-400);border:1px solid rgba(251,191,36,.2)}
+.cta-sec{padding:120px 0;text-align:center;background:radial-gradient(ellipse 80% 60% at 50% 50%,rgba(124,58,237,.12),transparent)}
+.cta-sec .section-title{max-width:700px;margin:0 auto 20px}
+.cta-sec .section-sub{margin:0 auto 40px;text-align:center}
+.seal-fx{display:inline-flex;align-items:center;justify-content:center;width:100px;height:100px;border-radius:50%;background:linear-gradient(135deg,var(--violet-600),var(--violet-700));box-shadow:0 0 60px rgba(124,58,237,.5),0 0 120px rgba(124,58,237,.2);margin-bottom:32px;font-size:44px;animation:float 3s ease-in-out infinite}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
+footer{padding:40px clamp(20px,5vw,80px);border-top:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px}
+.footer-brand{font-size:14px;font-weight:700;color:var(--violet-400)}
+.footer-sub{font-size:13px;color:var(--slate-600);margin-top:2px}
+.footer-links{display:flex;gap:20px}
+.footer-links a{font-size:13px;color:var(--slate-600);text-decoration:none;transition:color .2s}
+.footer-links a:hover{color:var(--violet-400)}
+@keyframes fade-up{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+.fade-up{animation:fade-up .6s ease-out both}
+.d1{animation-delay:.1s}.d2{animation-delay:.2s}.d3{animation-delay:.3s}
+@media(max-width:768px){.problem-grid,.tech-layout{grid-template-columns:1fr}.nav-links{display:none}}
+</style>
+</head>
+<body>
+<nav>
+  <a class="nav-brand" href="landing.html">
+    <div class="logo-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14c0 7-3.5 11-7 11S5 11 5 4z"/><line x1="12" y1="15" x2="12" y2="20"/><path d="M8 20h8"/></svg></div>
+    <div><div class="brand-text">Calice Poderoso</div><span class="brand-tag">AI Governance Platform</span></div>
+  </a>
+  <div class="nav-links">
+    <a class="nav-link" href="#problema">Problema</a>
+    <a class="nav-link" href="#como-funciona">Como funciona</a>
+    <a class="nav-link" href="#api">API</a>
+    <a class="nav-link" href="#prova">Prova Criptografica</a>
+  </div>
+  <a class="nav-cta" href="index.html">Abrir Console</a>
+</nav>
+<section class="hero">
+  <div class="hero-glow"></div>
+  <div class="hero-grid"></div>
+  <div class="hero-inner">
+    <div class="hero-badge fade-up"><span class="dot"></span>Plataforma operacional &middot; Versao MVP</div>
+    <h1 class="hero-title fade-up d1">Nenhuma decisao de IA<br><span class="grad">sem olhos humanos.</span></h1>
+    <p class="hero-sub fade-up d2">O <strong>Calice Poderoso</strong> e a camada de custodia probatoria que garante que qualquer saida de inteligencia artificial passe por <strong>juizo humano autenticado</strong>, registrado em livro-razao duplo com assinatura Ed25519 e selo institucional verificavel.</p>
+    <div class="hero-actions fade-up d3">
+      <a class="btn-p" href="index.html">Abrir Console de Governanca &rarr;</a>
+      <a class="btn-s" href="#como-funciona">Ver como funciona &rarr;</a>
+    </div>
+    <div class="hero-stats fade-up d3">
+      <div class="stat"><div class="stat-num">88<span>+</span></div><div class="stat-label">Testes automatizados</div></div>
+      <div class="stat"><div class="stat-num">2<span>x</span></div><div class="stat-label">Assinatura criptografica (HMAC + Ed25519)</div></div>
+      <div class="stat"><div class="stat-num"><span>0</span></div><div class="stat-label">Silencio nunca aprova</div></div>
+      <div class="stat"><div class="stat-num">100<span>%</span></div><div class="stat-label">Rastreabilidade pericial</div></div>
+    </div>
+  </div>
+</section>
+<section class="problem" id="problema">
+  <div class="container">
+    <span class="section-label">O Problema</span>
+    <h2 class="section-title">IA decide. Humano assiste.<br>Isso nao e governanca.</h2>
+    <p class="section-sub">O mundo esta delegando decisoes criticas para modelos de IA sem qualquer mecanismo formal de supervisao e responsabilizacao.</p>
+    <div class="problem-grid">
+      <div class="problem-cards">
+        <div class="problem-card"><div class="picon r">&#9888;</div><div class="problem-text"><h4>IA aprova sem responsavel</h4><p>Pipelines automatizados executam acoes de alto impacto sem registro auditavel de quem validou e por que.</p></div></div>
+        <div class="problem-card"><div class="picon a">&#128203;</div><div class="problem-text"><h4>Sem prova juridica de conformidade</h4><p>Em caso de litigio, como provar que um humano revisou a proposta antes de ela ser executada?</p></div></div>
+        <div class="problem-card"><div class="picon b">&#128275;</div><div class="problem-text"><h4>SLAs sem custodia formal</h4><p>Janelas de decisao abertas indefinidamente. Inercia aprovando por omissao. Sem carimbo de data/hora probatorio.</p></div></div>
+      </div>
+      <div class="sol-visual">
+        <div style="font-size:12px;color:var(--slate-400);font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">A solucao Calice Poderoso</div>
+        <div class="flow-step"><div class="flow-num">1</div><div class="flow-text">IA submete proposta &rarr; Calice intercepta e avalia</div></div>
+        <div class="flow-arr">&darr;</div>
+        <div class="flow-step"><div class="flow-num">2</div><div class="flow-text">Motor de regras diagnostica violacoes e ativa fator de pausa</div></div>
+        <div class="flow-arr">&darr;</div>
+        <div class="flow-step"><div class="flow-num">3</div><div class="flow-text">Operador humano autenticado (scrypt + bearer) decide com justificativa obrigatoria</div></div>
+        <div class="flow-arr">&darr;</div>
+        <div class="flow-step"><div class="flow-num">4</div><div class="flow-text">Livro-razao registra: HMAC + Ed25519 + selo CLC-AUTH</div></div>
+        <div class="flow-arr">&darr;</div>
+        <div class="flow-step"><div class="flow-num">5</div><div class="flow-text">Qualquer auditor verifica a integridade da cadeia a qualquer momento</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="how" id="como-funciona">
+  <div class="container">
+    <span class="section-label">Passo a Passo</span>
+    <h2 class="section-title">Como utilizar o Calice</h2>
+    <p class="section-sub">Do primeiro payload ao selo institucional verificavel em 6 etapas claras.</p>
+    <div class="steps-grid">
+      <div class="step-card"><div class="step-number">01</div><div class="step-icon">&#128232;</div><div class="step-title">Interceptar uma Proposta</div><p class="step-desc">Envie o payload da IA para o endpoint de interceptacao. O motor avalia confianca do modelo, clausula de responsabilidade e regras da politica do cliente. Se houver violacao, o <strong>Fator de Pausa</strong> e ativado imediatamente.</p><div class="step-code"><span class="cmt">// POST /api/v1/intercept</span><br>{ "document_id": "DOC-2026-001",<br>&nbsp;&nbsp;"confidence_score": 0.70,<br>&nbsp;&nbsp;"prazo_customizado_segundos": 1800 }</div></div>
+      <div class="step-card"><div class="step-number">02</div><div class="step-icon">&#128272;</div><div class="step-title">Autenticar como Operador</div><p class="step-desc">Apenas operadores com conta ativa podem decidir. A autenticacao e feita com <strong>scrypt + bearer token</strong>. Contas sao criadas via CLI com o comando abaixo.</p><div class="step-code"><span class="cmt">// Criar conta:</span><br>python main.py operador criar &lt;login&gt; "Nome"<br><span class="cmt">// POST /api/v1/auth/login</span></div></div>
+      <div class="step-card"><div class="step-number">03</div><div class="step-icon">&#9878;</div><div class="step-title">Revisar o Diagnostico</div><p class="step-desc">O console exibe as violacoes detectadas, o score de confianca do modelo, a janela de SLA com cronometro em tempo real. O operador declara <strong>ciencia explicita</strong> de cada violacao antes de decidir.</p><div class="step-code"><span class="cmt">// No Console em http://127.0.0.1:8000</span><br>Confianca: 0,70 (min: 0,85)<br>Lacuna juridica detectada | 29:45 restantes</div></div>
+      <div class="step-card"><div class="step-number">04</div><div class="step-icon">&#127963;</div><div class="step-title">Chancelar ou Rejeitar</div><p class="step-desc">Com justificativa obrigatoria (minimo 15 caracteres) e ciencia declarada de todas as violacoes, o operador chancela. O <strong>silencio nunca aprova</strong> por omissao. Sem decisao, a proposta fica travada.</p><div class="step-code"><span class="cmt">// POST /api/v1/seal</span><br>{ "transaction_id": "TX-...",<br>&nbsp;&nbsp;"notes": "Auditado e aprovado...",<br>&nbsp;&nbsp;"acknowledged_violations": [...] }</div></div>
+      <div class="step-card"><div class="step-number">05</div><div class="step-icon">&#128271;</div><div class="step-title">Verificar o Selo Institucional</div><p class="step-desc">Apos a chancela, e emitido um <strong>Selo CLC-AUTH</strong> em Base58 com HMAC-SHA256 e assinatura Ed25519. Qualquer auditor pode verificar o livro-razao publicamente, sem acesso a chave secreta.</p><div class="step-code"><span class="cmt">// GET /api/v1/ledger/verify</span><br>CLC-AUTH::TX-20260930-...::20260930...::De6BM...<br><span class="cmt">// python verificar_publico.py</span></div></div>
+      <div class="step-card" style="background:linear-gradient(135deg,rgba(124,58,237,.1),rgba(124,58,237,.03));border-color:rgba(124,58,237,.25)"><div class="step-number" style="color:rgba(124,58,237,.4)">06</div><div class="step-icon" style="background:rgba(124,58,237,.2)">&#128640;</div><div class="step-title">Integrar via API ou CLI</div><p class="step-desc">Use a bancada de estresse para teste concorrente, o roteiro <strong>demo_fluxo.py</strong> para demonstracao de ponta a ponta, ou integre diretamente via REST com payloads em portugues ou ingles.</p><div class="step-code">python demo_fluxo.py<br>python bancada_concorrente.py<br>python main.py estresse --eventos 100</div></div>
+    </div>
+  </div>
+</section>
+<section class="features" id="features">
+  <div class="container">
+    <span class="section-label">Funcionalidades</span>
+    <h2 class="section-title">Uma plataforma de governanca completa</h2>
+    <div class="features-grid">
+      <div class="feat"><div class="feat-icon">&#128279;</div><div class="feat-title">Livro-razao Duplo Encadeado</div><p class="feat-desc">Cada evento e encadeado com HMAC-SHA256 e assinado individualmente com Ed25519. Adulteracao de qualquer registro invalida toda a cadeia subsequente.</p><span class="feat-tag">Probatorio</span></div>
+      <div class="feat"><div class="feat-icon">&#8987;</div><div class="feat-title">SLA com Inercia Zero</div><p class="feat-desc">Cada proposta recebe um prazo definido. Esgotado o tempo sem decisao humana, o sistema lavra automaticamente o decurso do prazo. O silencio nunca aprova.</p><span class="feat-tag">Human-in-the-loop</span></div>
+      <div class="feat"><div class="feat-icon">&#127919;</div><div class="feat-title">Politicas por Cliente e Operacao</div><p class="feat-desc">Defina limiares de confianca, prazos e acoes no esgotamento por cliente (ex: CLI_1029) e canal de operacao (FINANCEIRO_PIX, CONTRATOS_JURIDICO).</p><span class="feat-tag">Multi-cliente</span></div>
+      <div class="feat"><div class="feat-icon">&#127754;</div><div class="feat-title">Streaming sob Custodia</div><p class="feat-desc">O CaliceEngine monitora a geracao de IA em tempo real chunk a chunk. Quando o score cai abaixo do limiar, a geracao e interrompida e registrada no livro imediatamente.</p><span class="feat-tag">Tempo real</span></div>
+      <div class="feat"><div class="feat-icon">&#128260;</div><div class="feat-title">WebSocket de Eventos ao Vivo</div><p class="feat-desc">O console web se mantém atualizado em tempo real via WebSocket. Novos eventos de interceptacao, chancela, rejeicao e timeout sem necessidade de polling.</p><span class="feat-tag">Reativo</span></div>
+      <div class="feat"><div class="feat-icon">&#9889;</div><div class="feat-title">Concorrencia com Integridade</div><p class="feat-desc">Transacoes atomicas BEGIN IMMEDIATE no SQLite com WAL. Disparos de 10 requisicoes simultaneas processadas sem quebra de cadeia de hashes.</p><span class="feat-tag">Alta disponibilidade</span></div>
+    </div>
+  </div>
+</section>
+<section class="tech" id="api">
+  <div class="container">
+    <span class="section-label">API e Integracao</span>
+    <h2 class="section-title">REST + WebSocket.<br>Integre em minutos.</h2>
+    <div class="tech-layout">
+      <div class="terminal">
+        <div class="term-bar"><span class="tdot r"></span><span class="tdot y"></span><span class="tdot g"></span><span class="term-title">POST /api/v1/intercept</span></div>
+        <div class="term-body">
+          <span class="tc"># Payload aceita portugues ou ingles</span><br>
+          <span class="tbr">{</span><br>
+          &nbsp;&nbsp;<span class="tk">"documento_id"</span>: <span class="ts">"DOC-PIX-2026"</span>,<br>
+          &nbsp;&nbsp;<span class="tk">"conteudo_proposto"</span>: <span class="ts">"Transferencia..."</span>,<br>
+          &nbsp;&nbsp;<span class="tk">"confianca_modelo"</span>: <span class="tn">0.72</span>,<br>
+          &nbsp;&nbsp;<span class="tk">"contem_clausula"</span>: <span class="tb">true</span>,<br>
+          &nbsp;&nbsp;<span class="tk">"janela_sla_segundos"</span>: <span class="tn">1800</span>,<br>
+          &nbsp;&nbsp;<span class="tk">"politica_cliente_id"</span>: <span class="ts">"CLI_1029"</span><br>
+          <span class="tbr">}</span><br><br>
+          <span class="tc"># Resposta 201 Created</span><br>
+          <span class="tbr">{</span><br>
+          &nbsp;&nbsp;<span class="tk">"transaction_id"</span>: <span class="ts">"TX-20260930-..."</span>,<br>
+          &nbsp;&nbsp;<span class="tk">"status"</span>: <span class="tr">"FATOR_DE_PAUSA_ATIVADO"</span>,<br>
+          &nbsp;&nbsp;<span class="tk">"janela"</span>: <span class="tbr">{</span> <span class="tk">"prazo_segundos"</span>: <span class="tn">1800</span> <span class="tbr">}</span><br>
+          <span class="tbr">}</span>
+        </div>
+      </div>
+      <div>
+        <p style="color:var(--slate-400);font-size:15px;line-height:1.7;margin-bottom:28px">A API aceita payloads com nomes de campos em <strong style="color:#fff">portugues ou ingles</strong>. Todos os endpoints retornam JSON estruturado e emitem eventos WebSocket em tempo real.</p>
+        <div class="endpoints">
+          <div class="endpoint"><span class="badge post">POST</span><span class="ep-path">/api/v1/intercept</span><span class="ep-desc">Interceptar proposta</span></div>
+          <div class="endpoint"><span class="badge post">POST</span><span class="ep-path">/api/v1/seal</span><span class="ep-desc">Chancelar e selar</span></div>
+          <div class="endpoint"><span class="badge post">POST</span><span class="ep-path">/api/v1/reject</span><span class="ep-desc">Rejeitar proposta</span></div>
+          <div class="endpoint"><span class="badge get">GET</span><span class="ep-path">/api/v1/ledger/verify</span><span class="ep-desc">Verificar integridade</span></div>
+          <div class="endpoint"><span class="badge get">GET</span><span class="ep-path">/api/v1/ledger/export</span><span class="ep-desc">Exportar livro</span></div>
+          <div class="endpoint"><span class="badge post">POST</span><span class="ep-path">/api/v1/auth/login</span><span class="ep-desc">Autenticar operador</span></div>
+          <div class="endpoint"><span class="badge post">POST</span><span class="ep-path">/api/v1/policies</span><span class="ep-desc">Criar politica</span></div>
+          <div class="endpoint"><span class="badge get">WS</span><span class="ep-path">/api/v1/ws/events</span><span class="ep-desc">Eventos ao vivo</span></div>
+        </div>
+        <div style="margin-top:20px"><code style="font-size:13px;color:var(--slate-400);font-family:var(--font-mono)">python main.py &nbsp;&nbsp;# inicia em http://127.0.0.1:8000</code></div>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="trust" id="prova">
+  <div class="container">
+    <span class="section-label">Prova Criptografica</span>
+    <h2 class="section-title">Probatorio por design.</h2>
+    <p class="section-sub">Cada decisao gera uma trilha de auditoria imutavel verificavel por terceiros sem acesso a chave secreta.</p>
+    <div class="trust-cards">
+      <div class="trust-card"><div class="icon">&#128272;</div><h3>HMAC-SHA256</h3><p>Cada bloco carrega o HMAC do bloco anterior. Alterar qualquer registro invalida toda a cadeia subsequente.</p><span class="pbadge g">Encadeamento Criptografico</span></div>
+      <div class="trust-card"><div class="icon">&#9997;</div><h3>Assinatura Ed25519</h3><p>Cada evento e assinado individualmente com chave privada Ed25519. A chave publica pode ser distribuida a auditores para verificacao sem exposicao do segredo.</p><span class="pbadge v">Autenticidade Publica</span></div>
+      <div class="trust-card"><div class="icon">&#127877;</div><h3>Selo CLC-AUTH em Base58</h3><p>O Selo Institucional Oficial e emitido em formato CLC-AUTH::TX::timestamp::token com referencia a transacao e carimbo de tempo.</p><span class="pbadge a">Verificacao Publica</span></div>
+      <div class="trust-card"><div class="icon">&#127758;</div><h3>Auditoria por Terceiros</h3><p>O script verificar_publico.py permite que qualquer auditor verifique toda a cadeia do livro-razao usando apenas a chave publica.</p><span class="pbadge g">Auditavel Externamente</span></div>
+    </div>
+  </div>
+</section>
+<section class="cta-sec">
+  <div class="container">
+    <div class="seal-fx">&#127963;</div>
+    <h2 class="section-title">Pronto para colocar<br>humanos no comando?</h2>
+    <p class="section-sub">O console esta rodando e esperando por voce. Abra, simule uma proposta e veja o Calice Poderoso em acao.</p>
+    <div class="hero-actions" style="justify-content:center">
+      <a class="btn-p" href="index.html">Abrir Console de Governanca &rarr;</a>
+      <a class="btn-s" href="#como-funciona">Rever o guia passo a passo</a>
+    </div>
+  </div>
+</section>
+<footer>
+  <div>
+    <div class="footer-brand">Calice Poderoso</div>
+    <div class="footer-sub">AI Governance Platform &middot; Branch feat/Pamura</div>
+  </div>
+  <div class="footer-links">
+    <a href="index.html">Console</a>
+    <a href="#api">API</a>
+    <a href="#prova">Auditoria</a>
+  </div>
+</footer>
+</body>
+</html>
