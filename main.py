@@ -1550,6 +1550,7 @@ def index() -> FileResponse:
 
 @app.get("/console", include_in_schema=False)
 @app.get("/console.html", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
 @app.get("/app", include_in_schema=False)
 def console() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
